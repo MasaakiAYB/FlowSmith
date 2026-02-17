@@ -48,7 +48,7 @@ jobs:
 
       - name: Entire CLI インストール
         run: |
-          curl -fsSL https://entire.io/install.sh | sh
+          curl -fsSL https://entire.io/install.sh | bash
           if command -v entire >/dev/null 2>&1; then
             entire version
             exit 0
