@@ -1,0 +1,14 @@
+{
+  "quality_gates": [
+    "git diff --check",
+    "pnpm lint",
+    "pnpm test",
+    "pnpm build"
+  ],
+  "pr": {
+    "labels": [
+      "agent",
+      "sample-webapp"
+    ]
+  }
+}

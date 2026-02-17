@@ -1,0 +1,150 @@
+name: 自律エージェント ディスパッチ受け口
+
+on:
+  repository_dispatch:
+    types:
+      - autonomous-agent-request
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+concurrency:
+  group: dispatch-${{ github.event.client_payload.project_id || github.event.client_payload.target_repo || 'unknown' }}-${{ github.event.client_payload.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    env:
+      AGENT_PLANNER_CMD: ${{ secrets.AGENT_PLANNER_CMD }}
+      AGENT_CODER_CMD: ${{ secrets.AGENT_CODER_CMD }}
+      AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Entire CLI インストール
+        run: |
+          curl -fsSL https://entire.io/install.sh | sh
+          if command -v entire >/dev/null 2>&1; then
+            entire version
+            exit 0
+          fi
+          if [ -x "$HOME/.entire/bin/entire" ]; then
+            echo "$HOME/.entire/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.entire/bin:$PATH"
+          elif [ -x "$HOME/.local/bin/entire" ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          entire version
+
+      - name: Git 実行ユーザー設定
+        run: |
+          git config user.name "flowsmith-agent[bot]"
+          git config user.email "flowsmith-agent[bot]@users.noreply.github.com"
+
+      - name: GitHub トークン解決
+        run: |
+          if [ -n "${{ secrets.CROSS_REPO_GH_TOKEN }}" ]; then
+            echo "GH_TOKEN=${{ secrets.CROSS_REPO_GH_TOKEN }}" >> "$GITHUB_ENV"
+          else
+            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: ディスパッチペイロード検証
+        id: payload
+        run: |
+          issue_number="$(jq -r '.client_payload.issue_number // empty | tostring' "$GITHUB_EVENT_PATH")"
+          project_id="$(jq -r '.client_payload.project_id // empty | tostring' "$GITHUB_EVENT_PATH")"
+          target_repo="$(jq -r '.client_payload.target_repo // empty | tostring' "$GITHUB_EVENT_PATH")"
+          base_branch="$(jq -r '.client_payload.base_branch // empty | tostring' "$GITHUB_EVENT_PATH")"
+          branch_name="$(jq -r '.client_payload.branch_name // empty | tostring' "$GITHUB_EVENT_PATH")"
+          no_sync_raw="$(jq -r '.client_payload.no_sync // false | tostring' "$GITHUB_EVENT_PATH")"
+          source_repository="$(jq -r '.client_payload.source_repository // empty | tostring' "$GITHUB_EVENT_PATH")"
+          request_id="$(jq -r '.client_payload.request_id // empty | tostring' "$GITHUB_EVENT_PATH")"
+
+          if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+            echo "client_payload.issue_number は正の整数で指定してください。" >&2
+            exit 1
+          fi
+
+          if [ -z "$project_id" ] && [ -z "$target_repo" ]; then
+            echo "client_payload.project_id または client_payload.target_repo のどちらかは必須です。" >&2
+            exit 1
+          fi
+
+          expected_secret="${{ secrets.DISPATCH_SHARED_SECRET }}"
+          if [ -n "$expected_secret" ]; then
+            provided_secret="$(jq -r '.client_payload.dispatch_secret // empty | tostring' "$GITHUB_EVENT_PATH")"
+            if [ -z "$provided_secret" ] || [ "$provided_secret" != "$expected_secret" ]; then
+              echo "dispatch_secret の検証に失敗しました。" >&2
+              exit 1
+            fi
+          fi
+
+          no_sync="false"
+          if [ "$no_sync_raw" = "true" ] || [ "$no_sync_raw" = "1" ]; then
+            no_sync="true"
+          fi
+
+          echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+          echo "project_id=$project_id" >> "$GITHUB_OUTPUT"
+          echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
+          echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+          echo "no_sync=$no_sync" >> "$GITHUB_OUTPUT"
+          echo "source_repository=$source_repository" >> "$GITHUB_OUTPUT"
+          echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
+
+      - name: 自律パイプライン実行
+        run: |
+          cmd=(
+            python scripts/agent_pipeline.py
+            --issue-number "${{ steps.payload.outputs.issue_number }}"
+            --push
+            --create-pr
+          )
+
+          if [ -n "${{ steps.payload.outputs.project_id }}" ]; then
+            cmd+=(--project "${{ steps.payload.outputs.project_id }}")
+          fi
+
+          if [ -n "${{ steps.payload.outputs.target_repo }}" ]; then
+            cmd+=(--target-repo "${{ steps.payload.outputs.target_repo }}")
+          fi
+
+          if [ -n "${{ steps.payload.outputs.base_branch }}" ]; then
+            cmd+=(--base-branch "${{ steps.payload.outputs.base_branch }}")
+          fi
+
+          if [ -n "${{ steps.payload.outputs.branch_name }}" ]; then
+            cmd+=(--branch-name "${{ steps.payload.outputs.branch_name }}")
+          fi
+
+          if [ "${{ steps.payload.outputs.no_sync }}" = "true" ]; then
+            cmd+=(--no-sync)
+          fi
+
+          "${cmd[@]}"
+
+      - name: ディスパッチサマリー出力
+        run: |
+          {
+            echo "## ディスパッチリクエスト"
+            echo ""
+            echo "- issue_number: \`${{ steps.payload.outputs.issue_number }}\`"
+            echo "- project_id: \`${{ steps.payload.outputs.project_id || '未指定' }}\`"
+            echo "- target_repo: \`${{ steps.payload.outputs.target_repo || '未指定' }}\`"
+            echo "- source_repository: \`${{ steps.payload.outputs.source_repository || '未指定' }}\`"
+            echo "- request_id: \`${{ steps.payload.outputs.request_id || '未指定' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,44 @@
+{
+  "base_branch": "main",
+  "max_attempts": 3,
+  "commit_message": "feat(agent): resolve issue #{issue_number}",
+  "quality_gates": [
+    "git diff --check"
+  ],
+  "templates": {
+    "planner": ".agent/prompts/planner.md",
+    "coder": ".agent/prompts/coder.md",
+    "reviewer": ".agent/prompts/reviewer.md",
+    "pr_body": ".agent/templates/pr_body.md"
+  },
+  "commands": {
+    "planner": "$AGENT_PLANNER_CMD",
+    "coder": "$AGENT_CODER_CMD",
+    "reviewer": "$AGENT_REVIEWER_CMD"
+  },
+  "entire": {
+    "enabled": true,
+    "required": true,
+    "command": "entire",
+    "agent": "codex",
+    "strategy": "manual-commit",
+    "scope": "project",
+    "verify_trailer": true,
+    "trailer_key": "Entire-Checkpoint",
+    "explicit_registration": {
+      "enabled": true,
+      "required": true,
+      "artifact_path": ".entire/evidence/issue-{issue_number}-{run_timestamp}.md",
+      "append_commit_trailers": true,
+      "max_chars_per_section": 6000,
+      "generate_explain": true
+    }
+  },
+  "pr": {
+    "title": "[agent] {issue_title}",
+    "labels": [
+      "agent"
+    ],
+    "draft": true
+  }
+}

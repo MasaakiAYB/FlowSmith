@@ -1,0 +1,49 @@
+name: エージェント作業依頼
+description: 自律エージェント実行向けの機械可読 Issue テンプレート
+title: "[エージェント作業] "
+labels:
+  - agent-task
+body:
+  - type: input
+    id: project_id
+    attributes:
+      label: プロジェクトID
+      description: 中央オーケストレーション利用時の .agent/projects.json 上のID（任意）
+      placeholder: sample-webapp
+    validations:
+      required: false
+  - type: textarea
+    id: objective
+    attributes:
+      label: 目的
+      description: 何を達成したいかを記載してください
+      placeholder: X を実装し、Y を満たす。
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: 非目的
+      description: スコープ外として明示したい内容
+      placeholder: Z は変更しない。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: 受け入れ条件
+      description: 完了条件を具体的に記載してください
+      placeholder: |
+        - [ ] API が 200 を返す
+        - [ ] 既存テストが通る
+        - [ ] 必要な新規テストを追加する
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: 制約
+      description: 変更可能パス、実行環境、セキュリティ制約など
+      placeholder: src/foo と tests/foo のみ変更可。
+    validations:
+      required: false

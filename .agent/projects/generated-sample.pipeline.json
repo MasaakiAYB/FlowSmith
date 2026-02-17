@@ -1,0 +1,14 @@
+{
+  "quality_gates": [
+    "git diff --check"
+  ],
+  "entire": {
+    "required": false,
+    "explicit_registration": {
+      "required": false
+    }
+  },
+  "pr": {
+    "labels": []
+  }
+}

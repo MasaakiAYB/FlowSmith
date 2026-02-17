@@ -1,0 +1,99 @@
+name: 自律エージェント PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "対象の GitHub Issue 番号"
+        required: true
+        type: string
+      project_id:
+        description: ".agent/projects.json の project id"
+        required: false
+        default: ""
+        type: string
+      target_repo:
+        description: "任意: 対象リポジトリ（owner/repo）。project設定より優先"
+        required: false
+        default: ""
+        type: string
+      base_branch:
+        description: "任意: ベースブランチの上書き"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    env:
+      AGENT_PLANNER_CMD: ${{ secrets.AGENT_PLANNER_CMD }}
+      AGENT_CODER_CMD: ${{ secrets.AGENT_CODER_CMD }}
+      AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Entire CLI インストール
+        run: |
+          curl -fsSL https://entire.io/install.sh | sh
+          if command -v entire >/dev/null 2>&1; then
+            entire version
+            exit 0
+          fi
+          if [ -x "$HOME/.entire/bin/entire" ]; then
+            echo "$HOME/.entire/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.entire/bin:$PATH"
+          elif [ -x "$HOME/.local/bin/entire" ]; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          entire version
+
+      - name: Git 実行ユーザー設定
+        run: |
+          git config user.name "flowsmith-agent[bot]"
+          git config user.email "flowsmith-agent[bot]@users.noreply.github.com"
+
+      - name: GitHub トークン解決
+        run: |
+          if [ -n "${{ secrets.CROSS_REPO_GH_TOKEN }}" ]; then
+            echo "GH_TOKEN=${{ secrets.CROSS_REPO_GH_TOKEN }}" >> "$GITHUB_ENV"
+          else
+            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 自律パイプライン実行
+        run: |
+          cmd=(
+            python scripts/agent_pipeline.py
+            --issue-number "${{ inputs.issue_number }}"
+            --push
+            --create-pr
+          )
+
+          if [ -n "${{ inputs.project_id }}" ]; then
+            cmd+=(--project "${{ inputs.project_id }}")
+          fi
+
+          if [ -n "${{ inputs.target_repo }}" ]; then
+            cmd+=(--target-repo "${{ inputs.target_repo }}")
+          fi
+
+          if [ -n "${{ inputs.base_branch }}" ]; then
+            cmd+=(--base-branch "${{ inputs.base_branch }}")
+          fi
+
+          "${cmd[@]}"
