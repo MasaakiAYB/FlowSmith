@@ -57,7 +57,13 @@
     "enabled": true,
     "required": true,
     "path": "ai-logs/issue-{issue_number}-{run_timestamp}",
-    "index_file": "index.md"
+    "index_file": "index.md",
+    "publish": {
+      "mode": "dedicated-branch",
+      "branch": "agent-ai-logs",
+      "required": true,
+      "commit_message": "chore(agent-logs): store issue #{issue_number} logs ({run_timestamp})"
+    }
   },
   "pr": {
     "title": "[agent] {issue_title}",

@@ -41,7 +41,7 @@ export GH_TOKEN='<your_github_token>'
 
 このフレームワークは、次の2層構成で Codex の検討を可視化します。
 
-- コミットメッセージ: `Problem / Decision / Validation / Risk / Evidence` の短要約
+- コミットメッセージ: `Problem / Decision / Validation / Risk` の短要約 + 末尾に `Codex-Log-Reference`
 - PR本文: `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク / 証跡リンク`
 
 - Codex へ与えた内容（Issue本文、planner prompt）
@@ -69,8 +69,10 @@ PR本文には次の必須セクションを出力します。
 - 検証コマンド（必須）
 - ログの場所（必須）
 
-また、実行ログを対象リポジトリの `ai-logs/issue-<番号>-<timestamp>/` に保存し、`index.md` へのリンクをPR本文へ記載します。
-`ai_logs.required: true` の場合、`ai-logs` 保存に失敗するとパイプラインは失敗します。
+また、実行ログは対象リポジトリ内の `ai-logs/issue-<番号>-<timestamp>/` へ生成したうえで、
+専用ブランチ（既定: `agent-ai-logs`）へ集約して `index.md` リンクをPR本文へ記載します。
+このため、実装PR用ブランチ（`main` 向け）には `ai-logs/` を含めません。
+`ai_logs.required: true` または `ai_logs.publish.required: true` の場合、保存/集約に失敗するとパイプラインは失敗します。
 
 `ai_logs` 設定例（`.agent/pipeline.json`）:
 
@@ -78,6 +80,10 @@ PR本文には次の必須セクションを出力します。
 - `required`: 保存失敗時にジョブを失敗させるか
 - `path`: 保存先ディレクトリ（リポジトリ相対。テンプレート変数可）
 - `index_file`: インデックスファイル名（既定: `index.md`）
+- `publish.mode`: `same-branch` または `dedicated-branch`
+- `publish.branch`: `dedicated-branch` 利用時の集約先ブランチ名
+- `publish.required`: 集約先ブランチへの反映失敗時にジョブを失敗させるか
+- `publish.commit_message`: 集約ブランチ用コミットメッセージテンプレート
 
 ## 実行モード
 

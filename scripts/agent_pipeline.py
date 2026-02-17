@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -463,7 +464,9 @@ def build_codex_commit_summary(
             f"- Decision: {decision_line}",
             f"- Validation: {validation_line}",
             f"- Risk: {risk_line}",
-            f"- Evidence: {evidence_path}",
+            "",
+            "Codex-Log-Reference:",
+            f"- AI Logs: {evidence_path}",
         ]
         appendix_text = "\n".join(appendix_lines).strip()
         if len(appendix_text) > max_total_chars:
@@ -583,6 +586,10 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
     ai_logs_dir = str(context.get("ai_logs_dir", "未保存")).strip() or "未保存"
     ai_logs_index_file = str(context.get("ai_logs_index_file", "未保存")).strip() or "未保存"
     ai_logs_url = str(context.get("ai_logs_index_url", "")).strip()
+    ai_logs_publish_mode = str(context.get("ai_logs_publish_mode", "same-branch")).strip() or "same-branch"
+    ai_logs_publish_status = str(context.get("ai_logs_publish_status", "unknown")).strip() or "unknown"
+    ai_logs_publish_branch = str(context.get("ai_logs_publish_branch", "")).strip()
+    ai_logs_publish_commit = str(context.get("ai_logs_publish_commit", "")).strip()
     run_dir = str(context.get("run_dir", "")).strip()
     entire_trace_file = str(context.get("entire_trace_file", "")).strip()
 
@@ -590,7 +597,13 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
         f"- AIログ保存状態: `{ai_logs_status}`",
         f"- AIログディレクトリ: `{ai_logs_dir}`",
         f"- AIログインデックス: `{ai_logs_index_file}`",
+        f"- AIログ保存モード: `{ai_logs_publish_mode}`",
     ]
+    if ai_logs_publish_mode == "dedicated-branch":
+        lines.append(f"- AIログ保存ブランチ: `{ai_logs_publish_branch or '未設定'}`")
+        lines.append(f"- AIログブランチ反映状態: `{ai_logs_publish_status}`")
+        if ai_logs_publish_commit:
+            lines.append(f"- AIログブランチコミット: `{ai_logs_publish_commit}`")
     if ai_logs_url:
         lines.append(f"- AIログリンク: {ai_logs_url}")
     else:
@@ -1578,6 +1591,247 @@ def save_ai_logs_bundle(
     }
 
 
+def resolve_ai_logs_publish_settings(
+    *,
+    config: dict[str, Any],
+    ai_logs_required: bool,
+) -> dict[str, Any]:
+    ai_logs_conf_raw = config.get("ai_logs", {})
+    if ai_logs_conf_raw is None:
+        ai_logs_conf_raw = {}
+    if not isinstance(ai_logs_conf_raw, dict):
+        raise RuntimeError("Config 'ai_logs' must be an object when specified.")
+
+    publish_conf_raw = ai_logs_conf_raw.get("publish", {})
+    if publish_conf_raw is None:
+        publish_conf_raw = {}
+    if not isinstance(publish_conf_raw, dict):
+        raise RuntimeError("Config 'ai_logs.publish' must be an object when specified.")
+
+    mode = str(publish_conf_raw.get("mode", "same-branch")).strip().lower()
+    if mode not in {"same-branch", "dedicated-branch"}:
+        raise RuntimeError(
+            "Config 'ai_logs.publish.mode' must be 'same-branch' or 'dedicated-branch'."
+        )
+
+    branch_name = ""
+    if mode == "dedicated-branch":
+        branch_name = str(publish_conf_raw.get("branch", "agent-ai-logs")).strip()
+        if not branch_name:
+            raise RuntimeError(
+                "Config 'ai_logs.publish.branch' must be set when mode is dedicated-branch."
+            )
+
+    required = bool(publish_conf_raw.get("required", ai_logs_required))
+    commit_message_template = str(
+        publish_conf_raw.get(
+            "commit_message",
+            "chore(agent-logs): store issue #{issue_number} logs ({run_timestamp})",
+        )
+    ).strip() or "chore(agent-logs): store issue #{issue_number} logs ({run_timestamp})"
+
+    return {
+        "mode": mode,
+        "branch": branch_name,
+        "required": required,
+        "commit_message_template": commit_message_template,
+    }
+
+
+def remove_ai_log_paths_from_worktree(
+    *,
+    repo_root: Path,
+    relative_paths: list[str],
+) -> None:
+    normalized_paths = sorted(
+        {
+            normalize_repo_path(str(item))
+            for item in relative_paths
+            if str(item).strip()
+        }
+    )
+    for relative_path in normalized_paths:
+        resolved = resolve_repo_relative_path(
+            relative_path,
+            repo_root=repo_root,
+            setting_name="ai_logs.path",
+        )
+        if resolved.is_file():
+            resolved.unlink()
+        elif resolved.is_dir():
+            shutil.rmtree(resolved, ignore_errors=True)
+        current = resolved.parent
+        while current != repo_root and current.exists():
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
+
+
+def publish_ai_logs_to_dedicated_branch(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    config: dict[str, Any],
+    context: dict[str, Any],
+    repo_slug: str,
+) -> dict[str, Any]:
+    ai_logs_required = bool(context.get("ai_logs_required", True))
+    publish_settings = resolve_ai_logs_publish_settings(
+        config=config,
+        ai_logs_required=ai_logs_required,
+    )
+    mode = str(publish_settings["mode"])
+    branch_name = str(publish_settings["branch"])
+    required = bool(publish_settings["required"])
+    commit_message_template = str(publish_settings["commit_message_template"])
+
+    default_state = {
+        "ai_logs_publish_mode": mode,
+        "ai_logs_publish_required": required,
+        "ai_logs_publish_branch": branch_name,
+        "ai_logs_publish_status": "skipped",
+        "ai_logs_publish_commit": "",
+    }
+    if mode != "dedicated-branch":
+        return default_state
+    if str(context.get("ai_logs_status", "")).strip().lower() != "saved":
+        return default_state
+
+    ai_logs_paths_raw = context.get("ai_logs_paths", [])
+    if not isinstance(ai_logs_paths_raw, list):
+        raise RuntimeError("Internal error: ai_logs_paths must be a list.")
+    ai_logs_paths = sorted(
+        {
+            normalize_repo_path(str(item))
+            for item in ai_logs_paths_raw
+            if str(item).strip()
+        }
+    )
+    if not ai_logs_paths:
+        message = "ai-logs ファイル一覧が空のため dedicated-branch へ保存できません。"
+        if required:
+            raise RuntimeError(message)
+        log(f"WARNING: {message}")
+        return {
+            **default_state,
+            "ai_logs_publish_status": "failed",
+        }
+
+    worktree_dir = Path(tempfile.mkdtemp(prefix="flowsmith-ai-logs-"))
+    worktree_added = False
+    published_commit = ""
+    try:
+        git(["fetch", "origin", branch_name], cwd=repo_root, check=False)
+        git(["worktree", "add", "--detach", str(worktree_dir), "HEAD"], cwd=repo_root)
+        worktree_added = True
+
+        remote_exists = (
+            git(
+                ["ls-remote", "--exit-code", "--heads", "origin", branch_name],
+                cwd=worktree_dir,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if remote_exists:
+            git(["fetch", "origin", branch_name], cwd=worktree_dir, check=False)
+            git(["checkout", "-B", branch_name, f"origin/{branch_name}"], cwd=worktree_dir)
+        else:
+            git(["checkout", "-B", branch_name], cwd=worktree_dir)
+
+        for relative_path in ai_logs_paths:
+            source = resolve_repo_relative_path(
+                relative_path,
+                repo_root=repo_root,
+                setting_name="ai_logs.path",
+            )
+            if not source.exists():
+                raise RuntimeError(
+                    f"ai-logs 保存対象ファイルが見つかりません: {relative_path}"
+                )
+            destination = resolve_repo_relative_path(
+                relative_path,
+                repo_root=worktree_dir,
+                setting_name="ai_logs.path",
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
+        git(["add", "--", *ai_logs_paths], cwd=worktree_dir)
+        has_changes = git(["diff", "--cached", "--quiet"], cwd=worktree_dir, check=False)
+        if has_changes.returncode != 0:
+            publish_message = format_template(
+                commit_message_template,
+                context,
+                "ai_logs.publish.commit_message",
+            )
+            git(["commit", "-m", publish_message], cwd=worktree_dir)
+
+        push_proc = git(
+            ["push", "-u", "origin", branch_name],
+            cwd=worktree_dir,
+            check=False,
+        )
+        if push_proc.returncode != 0:
+            push_stderr = push_proc.stderr or ""
+            if "non-fast-forward" in push_stderr:
+                git(["pull", "--rebase", "origin", branch_name], cwd=worktree_dir, check=True)
+                git(["push", "-u", "origin", branch_name], cwd=worktree_dir, check=True)
+            else:
+                raise RuntimeError(
+                    "ai-logs dedicated-branch への push に失敗しました。\n"
+                    f"stderr:\n{push_stderr}"
+                )
+
+        published_commit = git(["rev-parse", "HEAD"], cwd=worktree_dir).stdout.strip()
+    except (RuntimeError, OSError) as err:
+        if required:
+            raise RuntimeError(
+                f"ai-logs dedicated-branch 保存に失敗しました: {err}"
+            ) from err
+        message = f"ai-logs dedicated-branch 保存をスキップしました: {err}"
+        log(f"WARNING: {message}")
+        write_text(run_dir / "ai_logs_publish_status.md", f"- {message}\n")
+        return {
+            **default_state,
+            "ai_logs_publish_status": "failed",
+        }
+    finally:
+        if worktree_added:
+            git(["worktree", "remove", "--force", str(worktree_dir)], cwd=repo_root, check=False)
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+
+    remove_ai_log_paths_from_worktree(
+        repo_root=repo_root,
+        relative_paths=ai_logs_paths,
+    )
+    write_text(
+        run_dir / "ai_logs_publish_status.md",
+        (
+            "- ai-logs を dedicated-branch に反映しました。\n"
+            f"- branch: `{branch_name}`\n"
+            f"- commit: `{published_commit}`\n"
+            f"- files: `{len(ai_logs_paths)}`\n"
+        ),
+    )
+
+    index_file = str(context.get("ai_logs_index_file", "")).strip()
+    index_url = ""
+    if repo_slug and index_file:
+        index_url = f"https://github.com/{repo_slug}/blob/{branch_name}/{index_file}"
+
+    return {
+        **default_state,
+        "ai_logs_publish_status": "published",
+        "ai_logs_publish_commit": published_commit,
+        "ai_logs_index_url": index_url,
+        # コード変更用ブランチには ai-logs を含めない。
+        "ai_logs_paths": [],
+    }
+
+
 def push_branch(repo_root: Path, branch_name: str) -> None:
     git(["push", "-u", "origin", branch_name], cwd=repo_root)
 
@@ -1919,6 +2173,11 @@ def main() -> int:
         "ai_logs_dir": "未保存",
         "ai_logs_index_file": "未保存",
         "ai_logs_index_url": "",
+        "ai_logs_publish_mode": "same-branch",
+        "ai_logs_publish_required": True,
+        "ai_logs_publish_branch": "",
+        "ai_logs_publish_status": "skipped",
+        "ai_logs_publish_commit": "",
         "ai_logs_file_count": 0,
         "ai_logs_paths": [],
         "codex_commit_summary_required": True,
@@ -2090,6 +2349,14 @@ def main() -> int:
         context=context,
     )
     context.update(ai_logs_state)
+    ai_logs_publish_state = publish_ai_logs_to_dedicated_branch(
+        repo_root=target_repo_root,
+        run_dir=run_dir,
+        config=config,
+        context=context,
+        repo_slug=repo_slug,
+    )
+    context.update(ai_logs_publish_state)
     context["log_location_markdown"] = render_log_location_markdown(context)
 
     commit_message = format_template(
@@ -2139,9 +2406,16 @@ def main() -> int:
     if context.get("ai_logs_status") == "saved" and repo_slug:
         ai_logs_index_file = str(context.get("ai_logs_index_file", "")).strip()
         if ai_logs_index_file:
-            context["ai_logs_index_url"] = (
-                f"https://github.com/{repo_slug}/blob/{head_commit}/{ai_logs_index_file}"
-            )
+            ai_logs_publish_mode = str(context.get("ai_logs_publish_mode", "same-branch")).strip()
+            ai_logs_publish_branch = str(context.get("ai_logs_publish_branch", "")).strip()
+            if ai_logs_publish_mode == "dedicated-branch" and ai_logs_publish_branch:
+                context["ai_logs_index_url"] = (
+                    f"https://github.com/{repo_slug}/blob/{ai_logs_publish_branch}/{ai_logs_index_file}"
+                )
+            else:
+                context["ai_logs_index_url"] = (
+                    f"https://github.com/{repo_slug}/blob/{head_commit}/{ai_logs_index_file}"
+                )
     context["log_location_markdown"] = render_log_location_markdown(context)
 
     entire_checkpoint = ""
@@ -2238,6 +2512,10 @@ def main() -> int:
             f"- Entire trace verify: `{context['entire_trace_verify_status']}`\n"
             f"- Entire explain: `{context['entire_explain_status']}`\n"
             f"- AI logs status: `{context['ai_logs_status']}`\n"
+            f"- AI logs publish mode: `{context['ai_logs_publish_mode']}`\n"
+            f"- AI logs publish branch: `{context['ai_logs_publish_branch']}`\n"
+            f"- AI logs publish status: `{context['ai_logs_publish_status']}`\n"
+            f"- AI logs publish commit: `{context['ai_logs_publish_commit']}`\n"
             f"- AI logs index: `{context['ai_logs_index_file']}`\n"
             f"- AI logs files: `{context['ai_logs_file_count']}`\n"
             f"- Codex commit summary: `{context['codex_commit_summary_status']}`\n"

@@ -10,7 +10,7 @@
 6. Coder コマンドがコード変更を行い、各試行後に品質ゲートを実行する
 7. 失敗したゲート結果を次回試行のフィードバックとして渡す
 8. Codex への入力（Issue本文 / planner prompt）と検討結果（plan/review/coder出力/品質ゲート）を抽出し、コミットメッセージ要約を生成する
-9. `run_dir` の実行ログを対象リポジトリ `ai-logs/issue-<番号>-<timestamp>/` に保存する
+9. `run_dir` の実行ログを `ai-logs/issue-<番号>-<timestamp>/` に保存し、専用ブランチ（既定: `agent-ai-logs`）へ集約する
 10. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
 11. `.agent/templates/pr_body.md` から PR 本文を生成する（指示内容/検証コマンド/ログの場所を必須出力）
 12. 対象リポジトリに PR を作成または更新する
@@ -75,7 +75,8 @@
 - `max_points`: PR本文に展開する要点数
 - `max_total_chars`: コミット追記要約の最大文字数
 
-既定では有効で、コミットメッセージへ `Codex-Summary`（`Problem/Decision/Validation/Risk/Evidence`）を追記します。
+既定では有効で、コミットメッセージへ `Codex-Summary`（`Problem/Decision/Validation/Risk`）を追記し、
+末尾に `Codex-Log-Reference` としてログの場所を保存します。
 PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク・未解決 / 証跡リンク` を表示します。
 
 ## Entire CLI証跡設定（任意）
@@ -91,9 +92,14 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 - `required`: `ai-logs` 保存失敗時に処理を失敗させるか
 - `path`: 保存先ディレクトリ（リポジトリ相対）
 - `index_file`: インデックスファイル名
+- `publish.mode`: `same-branch` または `dedicated-branch`
+- `publish.branch`: `dedicated-branch` 利用時の集約先ブランチ名
+- `publish.required`: 集約ブランチ反映失敗時に処理を失敗させるか
+- `publish.commit_message`: 集約ブランチ用コミットメッセージテンプレート
 
-`required: true` の場合、`ai-logs` が保存できないと PR 作成前に失敗します。
-PR本文には `ai-logs` のインデックスファイルへのリンクを埋め込みます。
+既定は `publish.mode: dedicated-branch` です。`ai-logs` は専用ブランチへ集約され、実装PRブランチには含めません。
+`required: true` または `publish.required: true` の場合、保存/集約に失敗すると PR 作成前に失敗します。
+PR本文には専用ブランチ上の `ai-logs` インデックスファイルへのリンクを埋め込みます。
 
 ## 差し替え可能なエージェントコマンド
 
