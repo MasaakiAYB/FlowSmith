@@ -1178,11 +1178,23 @@ def resolve_runtime(
 
         default_base_branch = str(project.get("base_branch", "")).strip()
     else:
-        if not (target_repo_root / ".git").exists():
-            raise RuntimeError(
-                f"Target repository path is not a git repository: {target_repo_root}"
+        # For non-project mode with --target-repo, use a managed workspace clone by default.
+        if repo_slug:
+            if not args.target_path:
+                target_repo_root = (
+                    control_root / ".agent" / "workspaces" / slugify(repo_slug, max_len=80)
+                ).resolve()
+            prepare_target_repo(
+                target_repo_root=target_repo_root,
+                clone_url="",
+                repo_slug=repo_slug,
+                sync_target=not args.no_sync,
             )
-        if not repo_slug:
+        else:
+            if not (target_repo_root / ".git").exists():
+                raise RuntimeError(
+                    f"Target repository path is not a git repository: {target_repo_root}"
+                )
             repo_slug = detect_repo_slug(target_repo_root)
 
         target_defaults_raw = config.get("target_repo_defaults")
