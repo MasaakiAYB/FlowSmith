@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -171,6 +172,257 @@ def merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
             continue
         merged[key] = deepcopy(value)
     return merged
+
+
+def normalize_repo_path(path_value: str) -> str:
+    normalized = Path(path_value).as_posix()
+    if normalized.startswith("./"):
+        return normalized[2:]
+    return normalized
+
+
+def normalize_inline_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def clip_inline_text(value: str, *, max_chars: int) -> str:
+    normalized = normalize_inline_text(value)
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return normalized
+    suffix = "...[truncated]"
+    end = max(max_chars - len(suffix), 0)
+    return normalized[:end].rstrip() + suffix
+
+
+def summarize_file_for_commit(path: Path, *, max_chars: int) -> str:
+    if not path.exists():
+        return "(missing)"
+    content = read_text(path).strip()
+    if not content:
+        return "(empty)"
+    return clip_inline_text(content, max_chars=max_chars)
+
+
+def build_codex_commit_summary(
+    *,
+    run_dir: Path,
+    context: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    summary_conf_raw = config.get("codex_commit_summary", {})
+    if summary_conf_raw is None:
+        summary_conf_raw = {}
+    if not isinstance(summary_conf_raw, dict):
+        raise RuntimeError("Config 'codex_commit_summary' must be an object when specified.")
+
+    enabled = bool(summary_conf_raw.get("enabled", True))
+    required = bool(summary_conf_raw.get("required", True))
+    max_chars = parse_positive_int(
+        summary_conf_raw.get("max_chars_per_item"),
+        default=240,
+        name="codex_commit_summary.max_chars_per_item",
+    )
+    max_attempts = parse_positive_int(
+        summary_conf_raw.get("max_attempts"),
+        default=5,
+        name="codex_commit_summary.max_attempts",
+    )
+    max_total_chars = parse_positive_int(
+        summary_conf_raw.get("max_total_chars"),
+        default=3000,
+        name="codex_commit_summary.max_total_chars",
+    )
+
+    default_state = {
+        "codex_commit_summary_required": required,
+        "codex_commit_summary_status": "skipped",
+        "codex_commit_summary_appendix": "",
+        "codex_commit_summary_markdown": "_Codex検討要約は未生成です。_",
+    }
+    if not enabled:
+        write_text(run_dir / "codex_commit_summary_status.md", "- Codex要約は無効です。\n")
+        return default_state
+
+    try:
+        issue_title = str(context.get("issue_title", "")).strip() or "(untitled)"
+        issue_number = context.get("issue_number")
+        issue_body = str(context.get("issue_body", "")).strip()
+        plan_file = Path(str(context.get("plan_file", run_dir / "plan.md")))
+        review_file = Path(str(context.get("review_file", run_dir / "review.md")))
+        planner_prompt = run_dir / "planner_prompt.md"
+
+        issue_summary = clip_inline_text(
+            issue_body or "(Issue 本文なし)",
+            max_chars=max_chars,
+        )
+        planner_prompt_summary = summarize_file_for_commit(planner_prompt, max_chars=max_chars)
+        plan_summary = summarize_file_for_commit(plan_file, max_chars=max_chars)
+        review_summary = summarize_file_for_commit(review_file, max_chars=max_chars)
+
+        attempt_ids: set[int] = set()
+        for path in run_dir.glob("coder_output_attempt_*.md"):
+            idx = extract_attempt_index(path.name)
+            if idx != sys.maxsize:
+                attempt_ids.add(idx)
+        for path in run_dir.glob("validation_attempt_*.md"):
+            idx = extract_attempt_index(path.name)
+            if idx != sys.maxsize:
+                attempt_ids.add(idx)
+
+        attempt_lines: list[str] = []
+        markdown_attempt_lines: list[str] = []
+        for idx in sorted(attempt_ids)[:max_attempts]:
+            coder_summary = summarize_file_for_commit(
+                run_dir / f"coder_output_attempt_{idx}.md",
+                max_chars=max_chars,
+            )
+            validation_summary = summarize_file_for_commit(
+                run_dir / f"validation_attempt_{idx}.md",
+                max_chars=max_chars,
+            )
+            attempt_lines.append(
+                f"- attempt {idx}: coder={coder_summary}; validation={validation_summary}"
+            )
+            markdown_attempt_lines.extend(
+                [
+                    f"- attempt {idx}",
+                    f"  - coder: {coder_summary}",
+                    f"  - validation: {validation_summary}",
+                ]
+            )
+
+        if not attempt_lines:
+            attempt_lines.append("- attempt: (no coder attempts found)")
+            markdown_attempt_lines.append("- attempt: (no coder attempts found)")
+
+        appendix_lines = [
+            "Codex-Input-Summary:",
+            f"- Issue: #{issue_number} {issue_title}",
+            f"- Request: {issue_summary}",
+            f"- Planner Prompt: {planner_prompt_summary}",
+            "Codex-Consideration-Summary:",
+            f"- Plan: {plan_summary}",
+            f"- Review: {review_summary}",
+            *attempt_lines,
+            f"- Source Logs: {run_dir}",
+        ]
+        appendix_text = "\n".join(appendix_lines).strip()
+        if len(appendix_text) > max_total_chars:
+            appendix_text = clip_text(appendix_text, max_chars=max_total_chars).strip()
+
+        markdown_lines = [
+            "### Codex入力要約",
+            f"- Issue: `#{issue_number}` `{issue_title}`",
+            f"- Request: {issue_summary}",
+            f"- Planner Prompt: {planner_prompt_summary}",
+            "",
+            "### Codex検討要約",
+            f"- Plan: {plan_summary}",
+            f"- Review: {review_summary}",
+            *markdown_attempt_lines,
+            f"- Source Logs: `{run_dir}`",
+        ]
+        markdown_text = "\n".join(markdown_lines).strip()
+    except (RuntimeError, OSError) as err:
+        if required:
+            raise RuntimeError(f"Codex要約生成に失敗しました: {err}") from err
+        message = f"Codex要約生成をスキップしました: {err}"
+        log(f"WARNING: {message}")
+        write_text(run_dir / "codex_commit_summary_status.md", f"- {message}\n")
+        return default_state
+
+    write_text(
+        run_dir / "codex_commit_summary_status.md",
+        (
+            "- Codex要約を生成しました。\n"
+            f"- max_chars_per_item: `{max_chars}`\n"
+            f"- max_attempts: `{max_attempts}`\n"
+        ),
+    )
+    write_text(run_dir / "codex_commit_summary.md", appendix_text + "\n")
+    return {
+        **default_state,
+        "codex_commit_summary_status": "generated",
+        "codex_commit_summary_appendix": appendix_text,
+        "codex_commit_summary_markdown": markdown_text,
+    }
+
+
+def render_issue_instruction_markdown(
+    *,
+    issue_number: int,
+    issue_title: str,
+    issue_url: str,
+    issue_body: str,
+    max_chars: int = 12000,
+) -> str:
+    body = issue_body.strip() if issue_body else ""
+    if not body:
+        body = "(Issue 本文なし)"
+    clipped_body = clip_text(body, max_chars=max_chars).strip()
+    url_value = issue_url.strip() if issue_url and issue_url.strip() else "(local file)"
+    return (
+        f"- Issue: `#{issue_number}` `{issue_title}`\n"
+        f"- URL: {url_value}\n"
+        "- 要求本文:\n\n"
+        "~~~text\n"
+        f"{clipped_body}\n"
+        "~~~"
+    )
+
+
+def render_validation_commands_markdown(commands: list[str]) -> str:
+    if not commands:
+        return "- `(quality_gates 未設定)`"
+    return "\n".join(f"- `{item}`" for item in commands)
+
+
+def render_log_location_markdown(context: dict[str, Any]) -> str:
+    ai_logs_status = str(context.get("ai_logs_status", "unknown")).strip() or "unknown"
+    ai_logs_dir = str(context.get("ai_logs_dir", "未保存")).strip() or "未保存"
+    ai_logs_index_file = str(context.get("ai_logs_index_file", "未保存")).strip() or "未保存"
+    ai_logs_url = str(context.get("ai_logs_index_url", "")).strip()
+    run_dir = str(context.get("run_dir", "")).strip()
+    entire_trace_file = str(context.get("entire_trace_file", "")).strip()
+
+    lines = [
+        f"- AIログ保存状態: `{ai_logs_status}`",
+        f"- AIログディレクトリ: `{ai_logs_dir}`",
+        f"- AIログインデックス: `{ai_logs_index_file}`",
+    ]
+    if ai_logs_url:
+        lines.append(f"- AIログリンク: {ai_logs_url}")
+    else:
+        lines.append("- AIログリンク: `(コミット後に生成)`")
+    if run_dir:
+        lines.append(f"- FlowSmith 実行ログ(ローカル): `{run_dir}`")
+    if entire_trace_file and entire_trace_file != "未登録":
+        lines.append(f"- Entire 明示証跡: `{entire_trace_file}`")
+    return "\n".join(lines)
+
+
+def validate_required_pr_context(context: dict[str, Any]) -> None:
+    required_items = {
+        "instruction_markdown": "指示内容",
+        "validation_commands_markdown": "検証コマンド",
+        "log_location_markdown": "ログの場所",
+    }
+    missing_labels: list[str] = []
+    for key, label in required_items.items():
+        value = str(context.get(key, "")).strip()
+        if not value:
+            missing_labels.append(label)
+    if missing_labels:
+        raise RuntimeError(
+            "PR本文の必須項目が不足しています: " + ", ".join(missing_labels)
+        )
+
+    ai_logs_required = bool(context.get("ai_logs_required", True))
+    ai_logs_status = str(context.get("ai_logs_status", "")).strip().lower()
+    if ai_logs_required and ai_logs_status != "saved":
+        raise RuntimeError(
+            "PR本文の必須要件を満たせません: ai-logs が保存されていません。"
+        )
 
 
 def normalize_repo_slug(raw: str) -> str:
@@ -595,27 +847,50 @@ def commit_changes(
     message: str,
     *,
     ignore_paths: list[str] | None = None,
+    force_add_paths: list[str] | None = None,
+    required_paths: list[str] | None = None,
 ) -> None:
     git(["add", "-A"], cwd=repo_root)
+    force_add_set = {
+        normalize_repo_path(str(item))
+        for item in (force_add_paths or [])
+        if str(item).strip()
+    }
+    for path in sorted(force_add_set):
+        git(["add", "-f", "--", path], cwd=repo_root)
+
     staged_names = git(["diff", "--cached", "--name-only"], cwd=repo_root)
     staged_paths = [line.strip() for line in staged_names.stdout.splitlines() if line.strip()]
     if not staged_paths:
         raise RuntimeError("No file changes were created by the coder agent.")
 
     ignore_set = {
-        Path(item).as_posix().lstrip("./")
+        normalize_repo_path(str(item))
         for item in (ignore_paths or [])
         if str(item).strip()
     }
     meaningful_changes = [
         path
         for path in staged_paths
-        if Path(path).as_posix().lstrip("./") not in ignore_set
+        if normalize_repo_path(path) not in ignore_set
     ]
     if not meaningful_changes:
         raise RuntimeError(
             "No file changes were created by the coder agent. "
             "Only trace artifact files were changed."
+        )
+
+    required_set = {
+        normalize_repo_path(str(item))
+        for item in (required_paths or [])
+        if str(item).strip()
+    }
+    missing_required = sorted(path for path in required_set if path not in staged_paths)
+    if missing_required:
+        joined = ", ".join(missing_required)
+        raise RuntimeError(
+            "Required trace artifact files are not staged for commit: "
+            f"{joined}"
         )
 
     git(["commit", "-m", message], cwd=repo_root)
@@ -744,7 +1019,7 @@ def prepare_entire_explicit_registration(
     run_dir: Path,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    explicit_enabled = bool(context.get("entire_status") == "enabled" and context.get("entire_explicit_enabled"))
+    explicit_enabled = bool(context.get("entire_explicit_enabled"))
     explicit_required = bool(context.get("entire_explicit_required"))
     append_trailers = bool(context.get("entire_explicit_append_commit_trailers"))
     max_chars = parse_positive_int(
@@ -844,7 +1119,7 @@ def verify_entire_explicit_registration(
     run_dir: Path,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    explicit_enabled = bool(context.get("entire_status") == "enabled" and context.get("entire_explicit_enabled"))
+    explicit_enabled = bool(context.get("entire_explicit_enabled"))
     explicit_required = bool(context.get("entire_explicit_required"))
     append_trailers = bool(context.get("entire_explicit_append_commit_trailers"))
 
@@ -896,6 +1171,14 @@ def verify_entire_explicit_registration(
             else:
                 actual_hash = sha256_text(read_text(trace_path))
                 checks.append(f"- artifact_hash: `{actual_hash}`")
+                in_head = git(
+                    ["cat-file", "-e", f"HEAD:{trace_file}"],
+                    cwd=repo_root,
+                    check=False,
+                ).returncode == 0
+                checks.append(f"- artifact_in_head: `{'yes' if in_head else 'no'}`")
+                if not in_head:
+                    errors.append(f"証跡ファイルが HEAD コミットに含まれていません: {trace_file}")
                 if trace_hash and actual_hash != trace_hash:
                     errors.append(
                         "証跡ファイルの SHA256 が生成値と一致しません。 "
@@ -978,6 +1261,119 @@ def generate_entire_explain(
         **default_state,
         "entire_explain_status": "generated",
         "entire_explain_log": str(explain_log),
+    }
+
+
+def save_ai_logs_bundle(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    config: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    ai_logs_conf_raw = config.get("ai_logs", {})
+    if ai_logs_conf_raw is None:
+        ai_logs_conf_raw = {}
+    if not isinstance(ai_logs_conf_raw, dict):
+        raise RuntimeError("Config 'ai_logs' must be an object when specified.")
+
+    enabled = bool(ai_logs_conf_raw.get("enabled", True))
+    required = bool(ai_logs_conf_raw.get("required", True))
+    dir_template = (
+        str(ai_logs_conf_raw.get("path", "ai-logs/issue-{issue_number}-{run_timestamp}")).strip()
+        or "ai-logs/issue-{issue_number}-{run_timestamp}"
+    )
+    index_file_name = str(ai_logs_conf_raw.get("index_file", "index.md")).strip() or "index.md"
+
+    default_state = {
+        "ai_logs_required": required,
+        "ai_logs_status": "skipped",
+        "ai_logs_dir": "未保存",
+        "ai_logs_index_file": "未保存",
+        "ai_logs_index_url": "",
+        "ai_logs_file_count": 0,
+        "ai_logs_paths": [],
+    }
+    if not enabled:
+        write_text(run_dir / "ai_logs_status.md", "- ai-logs 保存は無効です。\n")
+        return default_state
+
+    try:
+        dir_relative_path = format_template(
+            dir_template,
+            context,
+            "ai_logs.path",
+        ).strip().rstrip("/")
+        if not dir_relative_path:
+            raise RuntimeError("ai_logs.path が空です。")
+        logs_dir_path = resolve_repo_relative_path(
+            dir_relative_path,
+            repo_root=repo_root,
+            setting_name="ai_logs.path",
+        )
+
+        source_files = sorted(path for path in run_dir.iterdir() if path.is_file())
+        if not source_files:
+            raise RuntimeError(f"ai-logs に保存するソースファイルがありません: {run_dir}")
+
+        copied_relative_paths: list[str] = []
+        for source in source_files:
+            destination = logs_dir_path / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            copied_relative_paths.append(
+                normalize_repo_path(str(Path(dir_relative_path) / source.name))
+            )
+
+        index_relative_path = normalize_repo_path(str(Path(dir_relative_path) / index_file_name))
+        index_path = resolve_repo_relative_path(
+            index_relative_path,
+            repo_root=repo_root,
+            setting_name="ai_logs.index_file",
+        )
+        file_list_markdown = "\n".join(f"- `{path}`" for path in copied_relative_paths)
+        index_content = (
+            "# AI Agent Logs\n\n"
+            "## メタデータ\n"
+            f"- issue: `#{context.get('issue_number')}`\n"
+            f"- branch: `{context.get('branch_name')}`\n"
+            f"- project: `{context.get('project_id') or 'default'}`\n"
+            f"- target_repo: `{context.get('target_repo') or '(inferred local git)'}`\n"
+            f"- run_timestamp: `{context.get('run_timestamp')}`\n"
+            f"- source_run_dir: `{run_dir}`\n"
+            f"- copied_file_count: `{len(copied_relative_paths)}`\n\n"
+            "## 収集ファイル\n"
+            f"{file_list_markdown}\n"
+        )
+        write_text(index_path, index_content)
+        if index_relative_path not in copied_relative_paths:
+            copied_relative_paths.append(index_relative_path)
+
+    except (RuntimeError, OSError) as err:
+        if required:
+            raise RuntimeError(f"ai-logs 保存に失敗しました: {err}") from err
+        message = f"ai-logs 保存をスキップしました: {err}"
+        log(f"WARNING: {message}")
+        write_text(run_dir / "ai_logs_status.md", f"- {message}\n")
+        return default_state
+
+    copied_relative_paths = sorted(set(copied_relative_paths))
+    write_text(
+        run_dir / "ai_logs_status.md",
+        (
+            "- ai-logs を保存しました。\n"
+            f"- directory: `{dir_relative_path}`\n"
+            f"- index: `{index_relative_path}`\n"
+            f"- files: `{len(copied_relative_paths)}`\n"
+        ),
+    )
+    return {
+        **default_state,
+        "ai_logs_status": "saved",
+        "ai_logs_dir": normalize_repo_path(dir_relative_path),
+        "ai_logs_index_file": index_relative_path,
+        "ai_logs_file_count": len(copied_relative_paths),
+        "ai_logs_paths": copied_relative_paths,
     }
 
 
@@ -1300,6 +1696,10 @@ def main() -> int:
         "max_attempts": max_attempts,
         "attempt": 1,
         "feedback": "None",
+        "instruction_markdown": "",
+        "validation_commands_markdown": "",
+        "log_location_markdown": "",
+        "codex_commit_summary_markdown": "_Codex検討要約は未生成です。_",
         "plan_markdown": "",
         "validation_summary": "",
         "review_markdown": "_Reviewer step skipped._",
@@ -1313,8 +1713,27 @@ def main() -> int:
         "entire_trace_verify_status": "skipped",
         "entire_explain_status": "skipped",
         "entire_explain_log": "",
+        "ai_logs_required": True,
+        "ai_logs_status": "skipped",
+        "ai_logs_dir": "未保存",
+        "ai_logs_index_file": "未保存",
+        "ai_logs_index_url": "",
+        "ai_logs_file_count": 0,
+        "ai_logs_paths": [],
+        "codex_commit_summary_required": True,
+        "codex_commit_summary_status": "skipped",
+        "codex_commit_summary_appendix": "",
         "head_commit": "",
     }
+
+    context["instruction_markdown"] = render_issue_instruction_markdown(
+        issue_number=issue["number"],
+        issue_title=issue["title"],
+        issue_url=issue["url"],
+        issue_body=issue["body"],
+    )
+    context["validation_commands_markdown"] = render_validation_commands_markdown(quality_gates)
+    context["log_location_markdown"] = render_log_location_markdown(context)
 
     write_text(
         task_file,
@@ -1450,34 +1869,79 @@ def main() -> int:
     else:
         write_text(review_file, "_Reviewer command is not configured._\n")
 
+    codex_summary_state = build_codex_commit_summary(
+        run_dir=run_dir,
+        context=context,
+        config=config,
+    )
+    context.update(codex_summary_state)
+
     explicit_registration_state = prepare_entire_explicit_registration(
         repo_root=target_repo_root,
         run_dir=run_dir,
         context=context,
     )
     context.update(explicit_registration_state)
+    ai_logs_state = save_ai_logs_bundle(
+        repo_root=target_repo_root,
+        run_dir=run_dir,
+        config=config,
+        context=context,
+    )
+    context.update(ai_logs_state)
+    context["log_location_markdown"] = render_log_location_markdown(context)
 
     commit_message = format_template(
         config.get("commit_message", "feat(agent): resolve issue #{issue_number}"),
         context,
         "commit_message",
     )
+    commit_appendix_parts: list[str] = []
+    codex_commit_appendix = str(context.get("codex_commit_summary_appendix", "")).strip()
+    if codex_commit_appendix:
+        commit_appendix_parts.append(codex_commit_appendix)
+    entire_trace_appendix = str(context.get("entire_trace_commit_appendix", "")).strip()
+    if entire_trace_appendix:
+        commit_appendix_parts.append(entire_trace_appendix)
     commit_message = build_commit_message(
         commit_message,
-        str(context.get("entire_trace_commit_appendix", "")),
+        "\n\n".join(commit_appendix_parts).strip(),
     )
     ignored_paths: list[str] = []
+    force_add_paths: list[str] = []
+    required_paths: list[str] = []
     if context.get("entire_trace_status") == "registered":
         trace_path_value = str(context.get("entire_trace_file", "")).strip()
         if trace_path_value:
             ignored_paths.append(trace_path_value)
+            force_add_paths.append(trace_path_value)
+            required_paths.append(trace_path_value)
+    ai_log_paths = context.get("ai_logs_paths", [])
+    if isinstance(ai_log_paths, list):
+        for path_value in ai_log_paths:
+            text = str(path_value).strip()
+            if not text:
+                continue
+            ignored_paths.append(text)
+            force_add_paths.append(text)
+            if bool(context.get("ai_logs_required", True)):
+                required_paths.append(text)
     commit_changes(
         target_repo_root,
         commit_message,
         ignore_paths=ignored_paths,
+        force_add_paths=force_add_paths,
+        required_paths=required_paths,
     )
     head_commit = get_head_commit_sha(target_repo_root)
     context["head_commit"] = head_commit
+    if context.get("ai_logs_status") == "saved" and repo_slug:
+        ai_logs_index_file = str(context.get("ai_logs_index_file", "")).strip()
+        if ai_logs_index_file:
+            context["ai_logs_index_url"] = (
+                f"https://github.com/{repo_slug}/blob/{head_commit}/{ai_logs_index_file}"
+            )
+    context["log_location_markdown"] = render_log_location_markdown(context)
 
     entire_checkpoint = ""
     if context.get("entire_status") == "enabled" and context.get("entire_verify_trailer"):
@@ -1543,6 +2007,7 @@ def main() -> int:
         pr_labels = pr_conf.get("labels", [])
         pr_draft = bool(pr_conf.get("draft", True))
 
+        validate_required_pr_context(context)
         write_text(pr_body_file, render_template_file(pr_template, context))
         pr_url = create_or_update_pr(
             repo_root=target_repo_root,
@@ -1571,6 +2036,10 @@ def main() -> int:
             f"- Entire trace sha256: `{context['entire_trace_sha256']}`\n"
             f"- Entire trace verify: `{context['entire_trace_verify_status']}`\n"
             f"- Entire explain: `{context['entire_explain_status']}`\n"
+            f"- AI logs status: `{context['ai_logs_status']}`\n"
+            f"- AI logs index: `{context['ai_logs_index_file']}`\n"
+            f"- AI logs files: `{context['ai_logs_file_count']}`\n"
+            f"- Codex commit summary: `{context['codex_commit_summary_status']}`\n"
             f"- Validation:\n{context['validation_summary']}\n"
         ),
     )

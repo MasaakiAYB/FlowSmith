@@ -9,14 +9,12 @@
 5. Planner コマンドが実装計画を作成する
 6. Coder コマンドがコード変更を行い、各試行後に品質ゲートを実行する
 7. 失敗したゲート結果を次回試行のフィードバックとして渡す
-8. コミット前に Entire CLI を有効化し、コミットメッセージへ証跡トレーラーを残す
-9. プロンプト/試行錯誤/設計根拠を `.entire/evidence/...` に明示登録し、`Entire-Trace-*` トレーラーをコミットメッセージへ追記する
+8. Codex への入力（Issue本文 / planner prompt）と検討結果（plan/review/coder出力/品質ゲート）を抽出し、コミットメッセージ要約を生成する
+9. `run_dir` の実行ログを対象リポジトリ `ai-logs/issue-<番号>-<timestamp>/` に保存する
 10. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
-11. コミット後に `Entire-Checkpoint` と `Entire-Trace-*` トレーラー、および証跡ファイルハッシュを検証する
-12. 必要に応じて `entire explain --commit HEAD --generate` を実行する
-13. `.agent/templates/pr_body.md` から PR 本文を生成する
-14. 対象リポジトリに PR を作成または更新する
-15. 人間レビューでマージ可否を判断する
+11. `.agent/templates/pr_body.md` から PR 本文を生成する（指示内容/検証コマンド/ログの場所を必須出力）
+12. 対象リポジトリに PR を作成または更新する
+13. 人間レビューでマージ可否を判断する
 
 ## 外部呼び出し受け口（ディスパッチ）
 
@@ -62,33 +60,38 @@
 
 プロジェクト設定ファイルは部分定義で構いません。`.agent/pipeline.json` に対してマージされます。
 
-`--project` を使わず `--target-repo` / `--target-path` で外部リポジトリを直接指定した場合は、  
-`.agent/pipeline.json` の `target_repo_defaults` が自動でマージされます。  
+`--project` を使わず `--target-repo` / `--target-path` で外部リポジトリを直接指定した場合は、
+`.agent/pipeline.json` の `target_repo_defaults` が自動でマージされます。
 これにより、対象リポジトリが増えても共通の既定挙動を一元管理できます。
 
-## Entire CLI証跡設定
+## Codexコミット要約設定
 
-`.agent/pipeline.json` の `entire` セクションで制御します。
+`.agent/pipeline.json` の `codex_commit_summary` セクションで制御します。
 
-- `enabled`: Entire連携の有効/無効
-- `required`: Entire連携失敗時に処理を失敗させるか
-- `command`: Entire CLI コマンド（例: `entire`）
-- `agent`: `entire enable --agent` に渡す識別子
-- `strategy`: `manual-commit` / `auto-commit` / `none`
-- `scope`: `project` / `global`
-- `verify_trailer`: コミット後トレーラー検証の有効/無効
-- `trailer_key`: 検証するトレーラーキー
-- `explicit_registration.enabled`: 明示登録の有効/無効
-- `explicit_registration.required`: 明示登録失敗時に処理を失敗させるか
-- `explicit_registration.artifact_path`: 証跡ファイル出力先（リポジトリ相対）
-- `explicit_registration.append_commit_trailers`: `Entire-Trace-File` / `Entire-Trace-SHA256` を付与するか
-- `explicit_registration.max_chars_per_section`: 各証跡セクションの最大文字数
-- `explicit_registration.generate_explain`: `entire explain --commit HEAD --generate` を実行するか
+- `enabled`: Codex要約の有効/無効
+- `required`: 要約生成失敗時に処理を失敗させるか
+- `max_chars_per_item`: 各要約項目の最大文字数
+- `max_attempts`: 要約対象の最大試行回数
+- `max_total_chars`: コミット追記要約の最大文字数
 
-パイプラインは `entire version` / `entire strategy set` / `entire enable` を順に実行し、必要に応じて `entire explain --commit HEAD --generate` を実行します。  
-明示登録が有効な場合は `.entire/evidence/...` を生成してコミットに含め、`Entire-Trace-*` トレーラーとハッシュ整合性を検証します。
-既定では `required: true` のため、Entire連携に失敗した場合はコミット前後で処理を停止します。
-GitHub Actions 側では workflow で `Entire CLI` をインストールしてからパイプラインを起動します。
+既定では有効で、コミットメッセージへ `Codex-Input-Summary` / `Codex-Consideration-Summary` を追記します。
+
+## Entire CLI証跡設定（任意）
+
+`.agent/pipeline.json` の `entire` セクションは残していますが、既定では `enabled: false` です。
+必要時のみ有効化してください。
+
+## ai-logs 設定
+
+`.agent/pipeline.json` の `ai_logs` セクションで制御します。
+
+- `enabled`: `ai-logs` 保存の有効/無効
+- `required`: `ai-logs` 保存失敗時に処理を失敗させるか
+- `path`: 保存先ディレクトリ（リポジトリ相対）
+- `index_file`: インデックスファイル名
+
+`required: true` の場合、`ai-logs` が保存できないと PR 作成前に失敗します。
+PR本文には `ai-logs` のインデックスファイルへのリンクを埋め込みます。
 
 ## 差し替え可能なエージェントコマンド
 
@@ -108,7 +111,7 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 4. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
 5. `AGENT_SETUP_SCRIPT` が設定されていれば実行
 6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
-7. `Entire CLI` をインストール
+7. `FLOWSMITH_ENABLE_ENTIRE=true` のときのみ `Entire CLI` をインストール
 
 関連 Secrets:
 

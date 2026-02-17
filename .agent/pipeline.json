@@ -28,8 +28,8 @@
     }
   },
   "entire": {
-    "enabled": true,
-    "required": true,
+    "enabled": false,
+    "required": false,
     "command": "entire",
     "agent": "codex",
     "strategy": "manual-commit",
@@ -37,13 +37,26 @@
     "verify_trailer": true,
     "trailer_key": "Entire-Checkpoint",
     "explicit_registration": {
-      "enabled": true,
-      "required": true,
+      "enabled": false,
+      "required": false,
       "artifact_path": ".entire/evidence/issue-{issue_number}-{run_timestamp}.md",
       "append_commit_trailers": true,
       "max_chars_per_section": 6000,
       "generate_explain": true
     }
+  },
+  "codex_commit_summary": {
+    "enabled": true,
+    "required": true,
+    "max_chars_per_item": 240,
+    "max_attempts": 5,
+    "max_total_chars": 3000
+  },
+  "ai_logs": {
+    "enabled": true,
+    "required": true,
+    "path": "ai-logs/issue-{issue_number}-{run_timestamp}",
+    "index_file": "index.md"
   },
   "pr": {
     "title": "[agent] {issue_title}",

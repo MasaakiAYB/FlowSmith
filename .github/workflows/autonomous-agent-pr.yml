@@ -130,7 +130,8 @@ jobs:
               raise SystemExit(1)
           PY
 
-      - name: Entire CLI インストール
+      - name: Entire CLI インストール（任意）
+        if: ${{ vars.FLOWSMITH_ENABLE_ENTIRE == 'true' }}
         run: |
           curl -fsSL https://entire.io/install.sh | bash
           if command -v entire >/dev/null 2>&1; then

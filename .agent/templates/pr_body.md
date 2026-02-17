@@ -4,11 +4,22 @@
 - プロジェクト: {project_id}
 - 対象リポジトリ: {target_repo}
 - コミット: {head_commit}
-- Entire証跡: {entire_checkpoint}
-- 明示証跡ファイル: {entire_trace_file}
-- 明示証跡ハッシュ: {entire_trace_sha256}
-- Entire explain: {entire_explain_status}
+- AIログ保存状態: {ai_logs_status}
+- AIログインデックス: {ai_logs_index_file}
+- AIログリンク: {ai_logs_index_url}
 - エージェント実行ディレクトリ: `{run_dir}`
+
+## 指示内容（必須）
+{instruction_markdown}
+
+## 検証コマンド（必須）
+{validation_commands_markdown}
+
+## ログの場所（必須）
+{log_location_markdown}
+
+## Codex検討要約
+{codex_commit_summary_markdown}
 
 ## 実装計画
 {plan_markdown}

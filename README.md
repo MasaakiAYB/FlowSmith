@@ -35,40 +35,45 @@ export GH_TOKEN='<your_github_token>'
 
 2. `.agent/projects.json` に対象プロジェクトを定義します。
 3. `Entire CLI` を使う場合は、事前にインストールと認証を実施します（例: `entire version` / `entire auth login`）。
-   GitHub Actions では workflow 内で `Entire CLI` を自動インストールします。
+   ただし現時点の既定設定では Entire 連携は無効です。Actions 側でも `FLOWSMITH_ENABLE_ENTIRE=true` のときのみインストールします。
 
-## Entire証跡（コミットログ）
+## Codex要約（コミットログ）
 
-このフレームワークは、コミット前に `Entire CLI` を実行して Git フックを有効化し、コミットメッセージに `Entire-Checkpoint` トレーラーを残します。  
-さらに `explicit_registration` を有効にすると、次を明示登録します。
+このフレームワークは、コミット前に次を抽出し、要約をコミットメッセージへ追記します。
 
-- プロンプト履歴（Planner / Coder各試行 / Reviewer）
-- 試行錯誤履歴（Coder出力と品質ゲート結果）
-- 設計根拠（plan/review の内容）
+- Codex へ与えた内容（Issue本文、planner prompt）
+- Codex の検討結果（plan/review、coder 出力と品質ゲート結果）
 
-登録内容は対象リポジトリの `.entire/evidence/issue-<番号>-<timestamp>.md` に保存され、同一コミットに含まれます。  
-同時にコミットメッセージへ `Entire-Trace-File` / `Entire-Trace-SHA256` トレーラーを追加し、コミット後に整合性検証します。
-この方式により、Entire がネイティブ収集していないエージェント実行でも、証跡をコミットベースで追跡できます。
+既定設定は `.agent/pipeline.json` の `codex_commit_summary` セクションです。
 
-既定設定は `.agent/pipeline.json` の `entire` セクションです。
+- `enabled`: Codex要約の有効/無効
+- `required`: 要約生成失敗時にジョブを失敗させるか
+- `max_chars_per_item`: 各要約項目の最大文字数
+- `max_attempts`: 要約対象の最大試行回数
+- `max_total_chars`: コミット追記要約の最大文字数
 
-- `enabled`: Entire連携を有効化
-- `required`: Entire連携に失敗したらジョブを失敗させる
-- `command`: Entire CLI コマンド（例: `entire`）
-- `agent`: `entire enable --agent` に渡すエージェント名
-- `strategy`: `manual-commit` / `auto-commit` / `none`
-- `scope`: `project` / `global`
-- `verify_trailer`: コミット後にトレーラー存在を検証する
-- `trailer_key`: 検証対象トレーラーキー（既定: `Entire-Checkpoint`）
-- `explicit_registration.enabled`: 明示登録を有効化
-- `explicit_registration.required`: 明示登録失敗時にジョブを失敗させる
-- `explicit_registration.artifact_path`: 証跡ファイル出力先（リポジトリ相対パス）
-- `explicit_registration.append_commit_trailers`: `Entire-Trace-*` トレーラーを追加
-- `explicit_registration.max_chars_per_section`: 各証跡セクションの記録上限文字数
-- `explicit_registration.generate_explain`: `entire explain --commit HEAD --generate` を実行
+## Entire連携（任意）
 
-既定では `required: true` のため、Entire CLI が未導入・未認証、またはトレーラー未付与の場合はジョブが失敗します。  
-実行時には `.agent/runs/.../entire_trace.md` にチェックポイント・明示登録・`explain` 実行結果が保存され、PR本文にも反映されます。
+`entire` セクションは残していますが、既定では `enabled: false` です。
+再度有効化する場合は `.agent/pipeline.json` の `entire.enabled` と `entire.explicit_registration.enabled` を `true` にしてください。
+
+## PR必須項目と ai-logs
+
+PR本文には次の必須セクションを出力します。
+
+- 指示内容（必須）
+- 検証コマンド（必須）
+- ログの場所（必須）
+
+また、実行ログを対象リポジトリの `ai-logs/issue-<番号>-<timestamp>/` に保存し、`index.md` へのリンクをPR本文へ記載します。
+`ai_logs.required: true` の場合、`ai-logs` 保存に失敗するとパイプラインは失敗します。
+
+`ai_logs` 設定例（`.agent/pipeline.json`）:
+
+- `enabled`: `ai-logs` 保存の有効/無効
+- `required`: 保存失敗時にジョブを失敗させるか
+- `path`: 保存先ディレクトリ（リポジトリ相対。テンプレート変数可）
+- `index_file`: インデックスファイル名（既定: `index.md`）
 
 ## 実行モード
 
@@ -101,7 +106,7 @@ python scripts/agent_pipeline.py \
   --create-pr
 ```
 
-`--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。  
+`--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。
 この仕組みで、リポジトリ追加のたびに `.agent/projects.json` を増やさなくても、共通の安全設定を標準化できます。
 
 ## GitHub Actions利用
