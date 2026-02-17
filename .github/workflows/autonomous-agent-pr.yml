@@ -159,6 +159,11 @@ jobs:
             echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
           fi
 
+      - name: Git 認証セットアップ
+        run: |
+          gh auth status
+          gh auth setup-git
+
       - name: 自律パイプライン実行
         run: |
           cmd=(
