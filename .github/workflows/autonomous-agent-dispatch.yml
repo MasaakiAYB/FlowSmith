@@ -23,6 +23,7 @@ jobs:
       AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
       AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
     steps:
       - name: チェックアウト
         uses: actions/checkout@v4
@@ -47,6 +48,23 @@ jobs:
           fi
           npm install -g @openai/codex
           codex --version
+
+      - name: Codex 認証設定
+        run: |
+          set -euo pipefail
+          if [ -n "${CODEX_AUTH_JSON_B64:-}" ]; then
+            mkdir -p "$HOME/.codex"
+            printf '%s' "$CODEX_AUTH_JSON_B64" | base64 --decode > "$HOME/.codex/auth.json"
+            chmod 600 "$HOME/.codex/auth.json"
+            echo "Codex 認証: CODEX_AUTH_JSON_B64 を使用"
+          elif [ -n "${OPENAI_API_KEY:-}" ]; then
+            printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
+            echo "Codex 認証: OPENAI_API_KEY を使用"
+          else
+            echo "OPENAI_API_KEY または CODEX_AUTH_JSON_B64 のいずれかを設定してください。" >&2
+            exit 1
+          fi
+          codex login status
 
       - name: エージェントセットアップスクリプト実行（任意）
         if: ${{ env.AGENT_SETUP_SCRIPT != '' }}

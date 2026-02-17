@@ -118,7 +118,8 @@ python scripts/agent_pipeline.py \
 - `AGENT_PLANNER_CMD`
 - `AGENT_CODER_CMD`
 - `AGENT_REVIEWER_CMD`（任意）
-- `OPENAI_API_KEY`（任意。`codex` が API キー認証を使う場合）
+- `OPENAI_API_KEY`（任意。`codex` の API キー認証に使用）
+- `CODEX_AUTH_JSON_B64`（任意。`~/.codex/auth.json` を base64 化して設定する暫定手段）
 - `AGENT_SETUP_SCRIPT`（任意。追加ツールを入れるためのシェルスクリプト）
 - `CROSS_REPO_GH_TOKEN`（任意、クロスリポジトリPRでは推奨）
 
@@ -127,9 +128,12 @@ python scripts/agent_pipeline.py \
 1. `actions/setup-python@v5` で Python 3.12 をセットアップ
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ
 3. `npm install -g @openai/codex` で `codex` CLI をインストール（既存ならスキップ）
-4. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
-5. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
-6. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
+4. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
+5. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
+6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
+7. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
+
+`CODEX_AUTH_JSON_B64` は検証用途の暫定手段です。安定運用は `OPENAI_API_KEY` の利用を推奨します。
 
 ## 外部呼び出し受け口（ディスパッチ）
 

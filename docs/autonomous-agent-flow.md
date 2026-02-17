@@ -105,18 +105,22 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 1. `actions/setup-python@v5` で Python 3.12 をセットアップ
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ
 3. `npm install -g @openai/codex` で `codex` CLI を導入（既存なら再インストールしない）
-4. `AGENT_SETUP_SCRIPT` が設定されていれば実行
-5. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
-6. `Entire CLI` をインストール
+4. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
+5. `AGENT_SETUP_SCRIPT` が設定されていれば実行
+6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
+7. `Entire CLI` をインストール
 
 関連 Secrets:
 
 - `AGENT_PLANNER_CMD`（必須）
 - `AGENT_CODER_CMD`（必須）
 - `AGENT_REVIEWER_CMD`（任意）
-- `OPENAI_API_KEY`（任意。`codex` の認証で使う場合）
+- `OPENAI_API_KEY`（任意。`codex` の API キー認証で使う場合）
+- `CODEX_AUTH_JSON_B64`（任意。`~/.codex/auth.json` の base64 文字列を使う暫定手段）
 - `AGENT_SETUP_SCRIPT`（任意。追加依存の導入スクリプト）
 - `CROSS_REPO_GH_TOKEN`（任意。クロスリポジトリ更新時に推奨）
+
+`CODEX_AUTH_JSON_B64` は一時検証向けです。安定運用は API キー認証を推奨します。
 
 各コマンドで使えるプレースホルダー:
 
