@@ -22,9 +22,11 @@
 - `.github/workflows/autonomous-agent-dispatch.yml`: 外部呼び出しディスパッチ受け口ワークフロー
 - `scripts/agent_pipeline.py`: Issue から PR までを実行するオーケストレーター
 
-## セットアップ
+## Usage
 
-1. エージェント実行コマンドを設定します。
+### セットアップ
+
+1. エージェント実行コマンドと GitHub トークンを設定します。
 
 ```bash
 export AGENT_PLANNER_CMD='codex run --non-interactive --prompt-file {prompt_file} --output-file {output_file}'
@@ -33,9 +35,103 @@ export AGENT_REVIEWER_CMD='codex run --non-interactive --prompt-file {prompt_fil
 export GH_TOKEN='<your_github_token>'
 ```
 
-2. `.agent/projects.json` に対象プロジェクトを定義します。
-3. `Entire CLI` を使う場合は、事前にインストールと認証を実施します（例: `entire version` / `entire auth login`）。
-   GitHub Actions では workflow 内で `Entire CLI` を自動インストールします。
+2. 必須 CLI の導入と認証状態を確認します。
+
+```bash
+python --version
+codex --version
+entire version
+gh auth status
+```
+
+3. `Entire CLI` 未認証の場合はログインします。
+
+```bash
+entire auth login
+```
+
+4. 対象プロジェクトを `.agent/projects.json` に定義します。
+
+### 実行方法
+
+現在のリポジトリを対象に実行する場合:
+
+```bash
+python scripts/agent_pipeline.py --issue-number 123 --push --create-pr
+```
+
+登録済みのマルチプロジェクトを対象に実行する場合:
+
+```bash
+python scripts/agent_pipeline.py \
+  --project sample-webapp \
+  --issue-number 123 \
+  --push \
+  --create-pr
+```
+
+`--project` を指定すると、`.agent/projects.json` を使って対象リポジトリとローカルワークスペースを解決します。ワークスペースが存在しない場合は最初に clone します。
+
+単発の外部リポジトリを対象に実行する場合:
+
+```bash
+python scripts/agent_pipeline.py \
+  --target-repo your-org/your-repo \
+  --target-path /tmp/your-repo \
+  --issue-number 123 \
+  --push \
+  --create-pr
+```
+
+`--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。
+
+### トラブルシュート
+
+症状: `gh` 認証不足で GitHub API 呼び出しに失敗する
+確認:
+
+```bash
+gh auth status
+```
+
+対処:
+
+```bash
+gh auth login
+export GH_TOKEN='<your_github_token>'
+```
+
+症状: 必須環境変数が未設定でエージェント起動時に失敗する
+確認:
+
+```bash
+env | rg '^AGENT_(PLANNER|CODER|REVIEWER)_CMD=|^GH_TOKEN='
+```
+
+対処:
+
+```bash
+export AGENT_PLANNER_CMD='codex run --non-interactive --prompt-file {prompt_file} --output-file {output_file}'
+export AGENT_CODER_CMD='codex run --non-interactive --prompt-file {prompt_file} --output-file {output_file}'
+export AGENT_REVIEWER_CMD='codex run --non-interactive --prompt-file {prompt_file} --output-file {output_file}'
+export GH_TOKEN='<your_github_token>'
+```
+
+症状: `codex` または `entire` が見つからず実行できない
+確認:
+
+```bash
+command -v codex
+command -v entire
+```
+
+対処:
+
+```bash
+npm install -g @openai/codex
+```
+
+`Entire CLI` は利用環境の手順に従ってインストールしてください。
 
 ## Entire証跡（コミットログ）
 
@@ -69,40 +165,6 @@ export GH_TOKEN='<your_github_token>'
 
 既定では `required: true` のため、Entire CLI が未導入・未認証、またはトレーラー未付与の場合はジョブが失敗します。  
 実行時には `.agent/runs/.../entire_trace.md` にチェックポイント・明示登録・`explain` 実行結果が保存され、PR本文にも反映されます。
-
-## 実行モード
-
-### 単一プロジェクト（現在のリポジトリ）
-
-```bash
-python scripts/agent_pipeline.py --issue-number 123 --push --create-pr
-```
-
-### マルチプロジェクト（登録済みプロジェクト）
-
-```bash
-python scripts/agent_pipeline.py \
-  --project sample-webapp \
-  --issue-number 123 \
-  --push \
-  --create-pr
-```
-
-`--project` を指定すると、`.agent/projects.json` を使って対象リポジトリとローカルワークスペースを解決します。ワークスペースが存在しない場合は最初に clone します。
-
-### 単発の外部リポジトリ
-
-```bash
-python scripts/agent_pipeline.py \
-  --target-repo your-org/your-repo \
-  --target-path /tmp/your-repo \
-  --issue-number 123 \
-  --push \
-  --create-pr
-```
-
-`--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。  
-この仕組みで、リポジトリ追加のたびに `.agent/projects.json` を増やさなくても、共通の安全設定を標準化できます。
 
 ## GitHub Actions利用
 
