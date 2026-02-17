@@ -148,8 +148,8 @@ jobs:
 
       - name: Git 実行ユーザー設定
         run: |
-          git config user.name "flowsmith-agent[bot]"
-          git config user.email "flowsmith-agent[bot]@users.noreply.github.com"
+          git config --global user.name "flowsmith-agent[bot]"
+          git config --global user.email "flowsmith-agent[bot]@users.noreply.github.com"
 
       - name: GitHub トークン解決
         run: |
