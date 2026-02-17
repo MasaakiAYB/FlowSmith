@@ -1759,7 +1759,8 @@ def publish_ai_logs_to_dedicated_branch(
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
 
-        git(["add", "--", *ai_logs_paths], cwd=worktree_dir)
+        # ai-logs は対象リポジトリで ignore されている場合があるため強制追加する。
+        git(["add", "-f", "--", *ai_logs_paths], cwd=worktree_dir)
         has_changes = git(["diff", "--cached", "--quiet"], cwd=worktree_dir, check=False)
         if has_changes.returncode != 0:
             publish_message = format_template(
