@@ -62,6 +62,10 @@
 
 プロジェクト設定ファイルは部分定義で構いません。`.agent/pipeline.json` に対してマージされます。
 
+`--project` を使わず `--target-repo` / `--target-path` で外部リポジトリを直接指定した場合は、  
+`.agent/pipeline.json` の `target_repo_defaults` が自動でマージされます。  
+これにより、対象リポジトリが増えても共通の既定挙動を一元管理できます。
+
 ## Entire CLI証跡設定
 
 `.agent/pipeline.json` の `entire` セクションで制御します。

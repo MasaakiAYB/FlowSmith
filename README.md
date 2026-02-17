@@ -101,6 +101,9 @@ python scripts/agent_pipeline.py \
   --create-pr
 ```
 
+`--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。  
+この仕組みで、リポジトリ追加のたびに `.agent/projects.json` を増やさなくても、共通の安全設定を標準化できます。
+
 ## GitHub Actions利用
 
 `自律エージェント PR` ワークフローを使い、次の入力を渡します。

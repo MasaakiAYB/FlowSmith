@@ -16,6 +16,17 @@
     "coder": "$AGENT_CODER_CMD",
     "reviewer": "$AGENT_REVIEWER_CMD"
   },
+  "target_repo_defaults": {
+    "entire": {
+      "required": false,
+      "explicit_registration": {
+        "required": false
+      }
+    },
+    "pr": {
+      "labels": []
+    }
+  },
   "entire": {
     "enabled": true,
     "required": true,

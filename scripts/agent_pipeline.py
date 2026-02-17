@@ -1178,6 +1178,18 @@ def resolve_runtime(
         if not repo_slug:
             repo_slug = detect_repo_slug(target_repo_root)
 
+        target_defaults_raw = config.get("target_repo_defaults")
+        if target_defaults_raw is None:
+            target_defaults_raw = {}
+        if not isinstance(target_defaults_raw, dict):
+            raise RuntimeError("Config 'target_repo_defaults' must be an object when specified.")
+
+        # Apply centralized defaults when targeting an external repository without --project.
+        if target_defaults_raw and (
+            bool(args.target_repo) or bool(args.target_path and target_repo_root != control_root)
+        ):
+            config = merge_dict(config, target_defaults_raw)
+
     validate_config(config, config_validation_path)
 
     run_namespace = slugify(project_id or repo_slug or target_repo_root.name, max_len=80)
