@@ -203,7 +203,51 @@ jobs:
 
           "${cmd[@]}"
 
+      - name: 失敗時ログ出力
+        id: debug_logs
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          runs_root=".agent/runs"
+          latest_run_dir=""
+          if [ -d "$runs_root" ]; then
+            latest_run_dir="$(ls -1dt "$runs_root"/*/* 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "$latest_run_dir" ]; then
+            echo "run_dir=" >> "$GITHUB_OUTPUT"
+            echo "[debug] agent run directory was not found."
+            exit 0
+          fi
+
+          echo "run_dir=$latest_run_dir" >> "$GITHUB_OUTPUT"
+          echo "[debug] latest run dir: $latest_run_dir"
+          echo "[debug] files:"
+          find "$latest_run_dir" -maxdepth 1 -type f | sort
+
+          if [ -f "$latest_run_dir/planner_command.log" ]; then
+            echo "::group::planner_command.log"
+            sed -n '1,240p' "$latest_run_dir/planner_command.log"
+            echo "::endgroup::"
+          fi
+
+          if [ -f "$latest_run_dir/entire_enable.log" ]; then
+            echo "::group::entire_enable.log"
+            sed -n '1,160p' "$latest_run_dir/entire_enable.log"
+            echo "::endgroup::"
+          fi
+
+      - name: 実行ログartifact保存
+        if: ${{ always() && steps.debug_logs.outputs.run_dir != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.debug_logs.outputs.run_dir }}
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: ディスパッチサマリー出力
+        if: ${{ always() }}
         run: |
           {
             echo "## ディスパッチリクエスト"

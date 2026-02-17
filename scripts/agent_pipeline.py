@@ -336,8 +336,15 @@ def run_agent_command(
     write_text(log_file, output)
 
     if proc.returncode != 0:
+        stdout_excerpt = clip_text(proc.stdout.strip(), max_chars=1200)
+        stderr_excerpt = clip_text(proc.stderr.strip(), max_chars=1200)
         raise RuntimeError(
-            f"{step_name} command failed. See {log_file} for details."
+            (
+                f"{step_name} command failed. See {log_file} for details.\n"
+                f"exit={proc.returncode}\n"
+                f"stdout_excerpt:\n{stdout_excerpt or '(empty)'}\n"
+                f"stderr_excerpt:\n{stderr_excerpt or '(empty)'}"
+            )
         )
 
     if not output_file.exists():
