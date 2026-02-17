@@ -46,6 +46,19 @@ def parse_positive_int(value: Any, *, default: int, name: str) -> int:
     return parsed
 
 
+def parse_string_list(value: Any, *, default: list[str], name: str) -> list[str]:
+    if value is None:
+        return list(default)
+    if not isinstance(value, list):
+        raise RuntimeError(f"Config '{name}' must be a list.")
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
 def sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -1056,14 +1069,182 @@ def setup_entire_trace(
     }
 
 
+def normalize_extensions(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in values:
+        text = str(item).strip().lower()
+        if not text:
+            continue
+        if not text.startswith("."):
+            text = "." + text
+        result.append(text)
+    return sorted(set(result))
+
+
+def build_ui_evidence_state(
+    *,
+    changed_paths: list[str],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    ui_conf_raw = config.get("ui_evidence", {})
+    if ui_conf_raw is None:
+        ui_conf_raw = {}
+    if not isinstance(ui_conf_raw, dict):
+        raise RuntimeError("Config 'ui_evidence' must be an object when specified.")
+
+    enabled = bool(ui_conf_raw.get("enabled", True))
+    required = bool(ui_conf_raw.get("required", True))
+    default_ui_extensions = [
+        ".html",
+        ".css",
+        ".scss",
+        ".sass",
+        ".less",
+        ".jsx",
+        ".tsx",
+        ".vue",
+        ".svelte",
+        ".astro",
+    ]
+    default_ui_path_keywords = [
+        "/components/",
+        "/pages/",
+        "/ui/",
+        "/frontend/",
+        "/web/",
+        "/client/",
+    ]
+    default_image_extensions = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+
+    ui_extensions = normalize_extensions(
+        parse_string_list(
+            ui_conf_raw.get("ui_extensions"),
+            default=default_ui_extensions,
+            name="ui_evidence.ui_extensions",
+        )
+        or default_ui_extensions
+    )
+    ui_path_keywords = [
+        normalize_repo_path(item).lower()
+        for item in parse_string_list(
+            ui_conf_raw.get("ui_path_keywords"),
+            default=default_ui_path_keywords,
+            name="ui_evidence.ui_path_keywords",
+        )
+    ]
+    image_extensions = normalize_extensions(
+        parse_string_list(
+            ui_conf_raw.get("image_extensions"),
+            default=default_image_extensions,
+            name="ui_evidence.image_extensions",
+        )
+        or default_image_extensions
+    )
+    max_ui_files = parse_positive_int(
+        ui_conf_raw.get("max_ui_files"),
+        default=8,
+        name="ui_evidence.max_ui_files",
+    )
+    max_images = parse_positive_int(
+        ui_conf_raw.get("max_images"),
+        default=5,
+        name="ui_evidence.max_images",
+    )
+
+    default_state = {
+        "ui_evidence_enabled": enabled,
+        "ui_evidence_required": required,
+        "ui_evidence_status": "skipped",
+        "ui_evidence_ui_files": [],
+        "ui_evidence_image_files": [],
+        "ui_evidence_appendix": "",
+    }
+    if not enabled:
+        return default_state
+
+    normalized_paths = sorted(
+        {
+            normalize_repo_path(item)
+            for item in changed_paths
+            if str(item).strip()
+        }
+    )
+    lowered_paths = [path.lower() for path in normalized_paths]
+
+    def is_ui_path(path_lower: str) -> bool:
+        suffix = Path(path_lower).suffix
+        if suffix in ui_extensions:
+            return True
+        return any(keyword in path_lower for keyword in ui_path_keywords)
+
+    def is_image_path(path_lower: str) -> bool:
+        suffix = Path(path_lower).suffix
+        return suffix in image_extensions
+
+    ui_files = [
+        path
+        for path, lowered in zip(normalized_paths, lowered_paths)
+        if is_ui_path(lowered)
+    ]
+    image_files = [
+        path
+        for path, lowered in zip(normalized_paths, lowered_paths)
+        if is_image_path(lowered)
+    ]
+    if not ui_files:
+        return {
+            **default_state,
+            "ui_evidence_status": "not-required",
+        }
+
+    if not image_files:
+        message = (
+            "UI変更が検出されましたが、スクリーンショットまたはGIF画像がコミット対象に含まれていません。 "
+            "UI変更時は画像証跡を追加してください。"
+        )
+        if required:
+            raise RuntimeError(message)
+        log(f"WARNING: {message}")
+        return {
+            **default_state,
+            "ui_evidence_status": "missing",
+            "ui_evidence_ui_files": ui_files,
+        }
+
+    ui_lines: list[str] = [
+        "UI-Evidence:",
+        "- UI Files:",
+    ]
+    for path in ui_files[:max_ui_files]:
+        ui_lines.append(f"  - `{path}`")
+    if len(ui_files) > max_ui_files:
+        ui_lines.append(f"  - ... ({len(ui_files) - max_ui_files} files omitted)")
+
+    ui_lines.append("- Screenshots or GIF:")
+    for path in image_files[:max_images]:
+        alt_text = Path(path).stem.replace("_", " ").replace("-", " ")
+        ui_lines.append(f"  - ![{alt_text}]({path})")
+    if len(image_files) > max_images:
+        ui_lines.append(f"  - ... ({len(image_files) - max_images} files omitted)")
+
+    return {
+        **default_state,
+        "ui_evidence_status": "attached",
+        "ui_evidence_ui_files": ui_files,
+        "ui_evidence_image_files": image_files,
+        "ui_evidence_appendix": "\n".join(ui_lines).strip(),
+    }
+
+
 def commit_changes(
     repo_root: Path,
     message: str,
     *,
+    config: dict[str, Any] | None = None,
     ignore_paths: list[str] | None = None,
     force_add_paths: list[str] | None = None,
     required_paths: list[str] | None = None,
-) -> None:
+) -> dict[str, Any]:
     git(["add", "-A"], cwd=repo_root)
     force_add_set = {
         normalize_repo_path(str(item))
@@ -1107,7 +1288,29 @@ def commit_changes(
             f"{joined}"
         )
 
-    git(["commit", "-m", message], cwd=repo_root)
+    ui_evidence_state = {
+        "ui_evidence_enabled": False,
+        "ui_evidence_required": False,
+        "ui_evidence_status": "skipped",
+        "ui_evidence_ui_files": [],
+        "ui_evidence_image_files": [],
+        "ui_evidence_appendix": "",
+    }
+    final_message = message
+    if config is not None:
+        ui_evidence_state = build_ui_evidence_state(
+            changed_paths=meaningful_changes,
+            config=config,
+        )
+        ui_appendix = str(ui_evidence_state.get("ui_evidence_appendix", "")).strip()
+        if ui_appendix:
+            final_message = build_commit_message(final_message, ui_appendix)
+
+    git(["commit", "-m", final_message], cwd=repo_root)
+    return {
+        **ui_evidence_state,
+        "commit_message_final": final_message,
+    }
 
 
 def get_head_commit_sha(repo_root: Path) -> str:
@@ -2184,6 +2387,12 @@ def main() -> int:
         "codex_commit_summary_required": True,
         "codex_commit_summary_status": "skipped",
         "codex_commit_summary_appendix": "",
+        "ui_evidence_enabled": True,
+        "ui_evidence_required": True,
+        "ui_evidence_status": "skipped",
+        "ui_evidence_ui_files": [],
+        "ui_evidence_image_files": [],
+        "ui_evidence_appendix": "",
         "head_commit": "",
     }
 
@@ -2395,13 +2604,15 @@ def main() -> int:
             force_add_paths.append(text)
             if bool(context.get("ai_logs_required", True)):
                 required_paths.append(text)
-    commit_changes(
+    commit_state = commit_changes(
         target_repo_root,
         commit_message,
+        config=config,
         ignore_paths=ignored_paths,
         force_add_paths=force_add_paths,
         required_paths=required_paths,
     )
+    context.update(commit_state)
     head_commit = get_head_commit_sha(target_repo_root)
     context["head_commit"] = head_commit
     if context.get("ai_logs_status") == "saved" and repo_slug:
@@ -2519,6 +2730,8 @@ def main() -> int:
             f"- AI logs publish commit: `{context['ai_logs_publish_commit']}`\n"
             f"- AI logs index: `{context['ai_logs_index_file']}`\n"
             f"- AI logs files: `{context['ai_logs_file_count']}`\n"
+            f"- UI evidence status: `{context['ui_evidence_status']}`\n"
+            f"- UI evidence files: `{len(context.get('ui_evidence_image_files', []))}`\n"
             f"- Codex commit summary: `{context['codex_commit_summary_status']}`\n"
             f"- Validation:\n{context['validation_summary']}\n"
         ),

@@ -53,6 +53,39 @@
     "max_points": 3,
     "max_total_chars": 3000
   },
+  "ui_evidence": {
+    "enabled": true,
+    "required": true,
+    "ui_extensions": [
+      ".html",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".jsx",
+      ".tsx",
+      ".vue",
+      ".svelte",
+      ".astro"
+    ],
+    "ui_path_keywords": [
+      "/components/",
+      "/pages/",
+      "/ui/",
+      "/frontend/",
+      "/web/",
+      "/client/"
+    ],
+    "image_extensions": [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".webp",
+      ".gif"
+    ],
+    "max_ui_files": 8,
+    "max_images": 5
+  },
   "ai_logs": {
     "enabled": true,
     "required": true,

@@ -79,6 +79,21 @@
 末尾に `Codex-Log-Reference` としてログの場所を保存します。
 PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク・未解決 / 証跡リンク` を表示します。
 
+## UI画像証跡設定
+
+`.agent/pipeline.json` の `ui_evidence` セクションで制御します。
+
+- `enabled`: UI証跡チェックの有効/無効
+- `required`: UI変更時に画像証跡が無い場合に失敗させるか
+- `ui_extensions`: UI変更として判定する拡張子
+- `ui_path_keywords`: UI変更として判定するパスキーワード
+- `image_extensions`: 証跡画像として許可する拡張子（スクリーンショット/GIF）
+- `max_ui_files`: コミットメッセージに列挙するUI変更ファイルの最大件数
+- `max_images`: コミットメッセージに埋め込む画像の最大件数
+
+既定では有効です。UI変更が検出された場合、画像証跡がコミット対象に無いとコミット前に失敗します。
+条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記します。
+
 ## Entire CLI証跡設定（任意）
 
 `.agent/pipeline.json` の `entire` セクションは残していますが、既定では `enabled: false` です。

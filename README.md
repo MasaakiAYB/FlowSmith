@@ -56,6 +56,26 @@ export GH_TOKEN='<your_github_token>'
 - `max_points`: PR本文に展開する要点数
 - `max_total_chars`: コミット追記要約の最大文字数
 
+## UI変更時の画像証跡（コミットメッセージ必須）
+
+UI変更を含むコミットでは、変更箇所のスクリーンショットまたはアニメーションGIFを
+コミット対象に含めることを必須化しています。
+
+- UI変更が検出される条件: `ui_evidence.ui_extensions` または `ui_evidence.ui_path_keywords`
+- 画像証跡として認める条件: `ui_evidence.image_extensions`
+- 必須条件を満たさない場合: コミット前にパイプラインを失敗させる
+- 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記する
+
+`ui_evidence` 設定例（`.agent/pipeline.json`）:
+
+- `enabled`: UI証跡チェックの有効/無効
+- `required`: UI変更時に画像が無い場合に失敗させるか
+- `ui_extensions`: UI変更として判定する拡張子
+- `ui_path_keywords`: UI変更として判定するパスキーワード
+- `image_extensions`: 証跡画像として許可する拡張子
+- `max_ui_files`: コミットメッセージに列挙するUI変更ファイルの最大件数
+- `max_images`: コミットメッセージに埋め込む画像の最大件数
+
 ## Entire連携（任意）
 
 `entire` セクションは残していますが、既定では `enabled: false` です。
