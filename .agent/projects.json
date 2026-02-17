@@ -4,13 +4,13 @@
     "sample-webapp": {
       "repo": "your-org/your-repo",
       "base_branch": "main",
-      "config": ".agent/projects/sample-webapp.pipeline.json"
+      "config": "projects/sample-webapp.pipeline.json"
     },
     "generated-sample-repo": {
       "repo": "MasaakiAYB/GeneratedSampleRepo",
       "local_path": "/tmp/GeneratedSampleRepo",
       "base_branch": "main",
-      "config": ".agent/projects/generated-sample.pipeline.json"
+      "config": "projects/generated-sample.pipeline.json"
     }
   }
 }
