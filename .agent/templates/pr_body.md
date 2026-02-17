@@ -18,7 +18,7 @@
 ## ログの場所（必須）
 {log_location_markdown}
 
-## Codex検討要約
+## Codex判断ログ
 {codex_commit_summary_markdown}
 
 ## 実装計画

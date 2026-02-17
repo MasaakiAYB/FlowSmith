@@ -72,9 +72,11 @@
 - `required`: 要約生成失敗時に処理を失敗させるか
 - `max_chars_per_item`: 各要約項目の最大文字数
 - `max_attempts`: 要約対象の最大試行回数
+- `max_points`: PR本文に展開する要点数
 - `max_total_chars`: コミット追記要約の最大文字数
 
-既定では有効で、コミットメッセージへ `Codex-Input-Summary` / `Codex-Consideration-Summary` を追記します。
+既定では有効で、コミットメッセージへ `Codex-Summary`（`Problem/Decision/Validation/Risk/Evidence`）を追記します。
+PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク・未解決 / 証跡リンク` を表示します。
 
 ## Entire CLI証跡設定（任意）
 

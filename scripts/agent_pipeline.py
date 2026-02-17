@@ -194,13 +194,93 @@ def clip_inline_text(value: str, *, max_chars: int) -> str:
     return normalized[:end].rstrip() + suffix
 
 
-def summarize_file_for_commit(path: Path, *, max_chars: int) -> str:
+def strip_markdown_prefix(line: str) -> str:
+    text = line.strip()
+    if not text:
+        return ""
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"^\s*[-*+]\s+", "", text)
+    text = re.sub(r"^\s*\d+[.)]\s+", "", text)
+    return normalize_inline_text(text)
+
+
+def is_noninformative_highlight(text: str) -> bool:
+    normalized = normalize_inline_text(text).lower()
+    if not normalized:
+        return True
+    generic_tokens = {
+        "plan",
+        "review",
+        "summary",
+        "overview",
+        "scope",
+        "notes",
+        "todo",
+        "概要",
+        "要約",
+        "実装計画",
+        "検証結果",
+        "レビューレポート",
+    }
+    if normalized in generic_tokens:
+        return True
+    if len(normalized) <= 2 and re.fullmatch(r"[a-z0-9]+", normalized):
+        return True
+    return False
+
+
+def extract_text_highlights(raw_text: str, *, max_items: int, max_chars: int) -> list[str]:
+    if max_items <= 0:
+        return []
+    lines = raw_text.splitlines()
+    highlights: list[str] = []
+    in_code_block = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        normalized = strip_markdown_prefix(line)
+        if not normalized:
+            continue
+        if is_noninformative_highlight(normalized):
+            continue
+        highlights.append(clip_inline_text(normalized, max_chars=max_chars))
+        if len(highlights) >= max_items:
+            break
+
+    if highlights:
+        return highlights
+    fallback = clip_inline_text(raw_text or "(empty)", max_chars=max_chars).strip()
+    return [fallback or "(empty)"]
+
+
+def extract_file_highlights(path: Path, *, max_items: int, max_chars: int) -> list[str]:
     if not path.exists():
-        return "(missing)"
+        return ["(missing)"]
     content = read_text(path).strip()
     if not content:
-        return "(empty)"
-    return clip_inline_text(content, max_chars=max_chars)
+        return ["(empty)"]
+    return extract_text_highlights(content, max_items=max_items, max_chars=max_chars)
+
+
+def first_meaningful(items: list[str], *, fallback: str) -> str:
+    for item in items:
+        value = normalize_inline_text(item)
+        if value and value not in {"(missing)", "(empty)"}:
+            return value
+    return fallback
+
+
+def detect_attempt_status(validation_text: str) -> str:
+    upper = validation_text.upper()
+    if "FAIL" in upper:
+        return "failed"
+    if "PASS" in upper:
+        return "passed"
+    return "unknown"
 
 
 def build_codex_commit_summary(
@@ -227,6 +307,11 @@ def build_codex_commit_summary(
         default=5,
         name="codex_commit_summary.max_attempts",
     )
+    max_points = parse_positive_int(
+        summary_conf_raw.get("max_points"),
+        default=3,
+        name="codex_commit_summary.max_points",
+    )
     max_total_chars = parse_positive_int(
         summary_conf_raw.get("max_total_chars"),
         default=3000,
@@ -237,7 +322,7 @@ def build_codex_commit_summary(
         "codex_commit_summary_required": required,
         "codex_commit_summary_status": "skipped",
         "codex_commit_summary_appendix": "",
-        "codex_commit_summary_markdown": "_Codex検討要約は未生成です。_",
+        "codex_commit_summary_markdown": "_Codex判断ログは未生成です。_",
     }
     if not enabled:
         write_text(run_dir / "codex_commit_summary_status.md", "- Codex要約は無効です。\n")
@@ -247,17 +332,38 @@ def build_codex_commit_summary(
         issue_title = str(context.get("issue_title", "")).strip() or "(untitled)"
         issue_number = context.get("issue_number")
         issue_body = str(context.get("issue_body", "")).strip()
+        issue_url = str(context.get("issue_url", "")).strip()
         plan_file = Path(str(context.get("plan_file", run_dir / "plan.md")))
         review_file = Path(str(context.get("review_file", run_dir / "review.md")))
         planner_prompt = run_dir / "planner_prompt.md"
+        quality_gates = config.get("quality_gates", [])
+        quality_gate_lines: list[str] = []
+        if isinstance(quality_gates, list):
+            for gate in quality_gates:
+                gate_text = str(gate).strip()
+                if gate_text:
+                    quality_gate_lines.append(f"`{gate_text}`")
 
-        issue_summary = clip_inline_text(
+        issue_points = extract_text_highlights(
             issue_body or "(Issue 本文なし)",
+            max_items=max_points,
             max_chars=max_chars,
         )
-        planner_prompt_summary = summarize_file_for_commit(planner_prompt, max_chars=max_chars)
-        plan_summary = summarize_file_for_commit(plan_file, max_chars=max_chars)
-        review_summary = summarize_file_for_commit(review_file, max_chars=max_chars)
+        planner_prompt_points = extract_file_highlights(
+            planner_prompt,
+            max_items=1,
+            max_chars=max_chars,
+        )
+        plan_points = extract_file_highlights(
+            plan_file,
+            max_items=max_points,
+            max_chars=max_chars,
+        )
+        review_points = extract_file_highlights(
+            review_file,
+            max_items=max_points,
+            max_chars=max_chars,
+        )
 
         attempt_ids: set[int] = set()
         for path in run_dir.glob("coder_output_attempt_*.md"):
@@ -269,58 +375,152 @@ def build_codex_commit_summary(
             if idx != sys.maxsize:
                 attempt_ids.add(idx)
 
-        attempt_lines: list[str] = []
-        markdown_attempt_lines: list[str] = []
+        attempt_rows: list[dict[str, Any]] = []
+        last_validation_lines: list[str] = ["(missing)"]
         for idx in sorted(attempt_ids)[:max_attempts]:
-            coder_summary = summarize_file_for_commit(
+            coder_prompt_points = extract_file_highlights(
+                run_dir / f"coder_prompt_attempt_{idx}.md",
+                max_items=1,
+                max_chars=max_chars,
+            )
+            coder_points = extract_file_highlights(
                 run_dir / f"coder_output_attempt_{idx}.md",
+                max_items=1,
                 max_chars=max_chars,
             )
-            validation_summary = summarize_file_for_commit(
-                run_dir / f"validation_attempt_{idx}.md",
+            validation_path = run_dir / f"validation_attempt_{idx}.md"
+            validation_points = extract_file_highlights(
+                validation_path,
+                max_items=max_points,
                 max_chars=max_chars,
             )
-            attempt_lines.append(
-                f"- attempt {idx}: coder={coder_summary}; validation={validation_summary}"
+            validation_raw = read_text(validation_path) if validation_path.exists() else ""
+            status = detect_attempt_status(validation_raw)
+            goal = first_meaningful(
+                coder_prompt_points,
+                fallback="要件実装のための変更を実施",
             )
-            markdown_attempt_lines.extend(
-                [
-                    f"- attempt {idx}",
-                    f"  - coder: {coder_summary}",
-                    f"  - validation: {validation_summary}",
-                ]
+            action = first_meaningful(
+                coder_points,
+                fallback="変更内容の詳細は ai-logs を参照",
             )
+            validation = first_meaningful(
+                validation_points,
+                fallback="検証ログを参照",
+            )
+            attempt_rows.append(
+                {
+                    "attempt": idx,
+                    "status": status,
+                    "goal": goal,
+                    "action": action,
+                    "validation": validation,
+                }
+            )
+            last_validation_lines = validation_points
 
-        if not attempt_lines:
-            attempt_lines.append("- attempt: (no coder attempts found)")
-            markdown_attempt_lines.append("- attempt: (no coder attempts found)")
+        problem_line = f"Issue #{issue_number} {issue_title}"
+        decision_line = first_meaningful(
+            plan_points,
+            fallback="最小変更で要件を満たす方針",
+        )
+        validation_line = first_meaningful(
+            last_validation_lines,
+            fallback=clip_inline_text(
+                str(context.get("validation_summary", "検証結果なし")),
+                max_chars=max_chars,
+            ),
+        )
+        risk_line = first_meaningful(
+            review_points,
+            fallback="重大な未解決リスクは記録されていません。",
+        )
+        issue_basis = first_meaningful(
+            issue_points,
+            fallback=clip_inline_text(issue_title, max_chars=max_chars),
+        )
+        implementation_basis = first_meaningful(
+            plan_points[1:] if len(plan_points) > 1 else plan_points,
+            fallback=decision_line,
+        )
+        quality_basis = ", ".join(quality_gate_lines) if quality_gate_lines else "quality_gates 未設定"
+
+        ai_logs_conf_raw = config.get("ai_logs", {})
+        if ai_logs_conf_raw is None:
+            ai_logs_conf_raw = {}
+        if not isinstance(ai_logs_conf_raw, dict):
+            raise RuntimeError("Config 'ai_logs' must be an object when specified.")
+        ai_logs_path_template = str(
+            ai_logs_conf_raw.get("path", "ai-logs/issue-{issue_number}-{run_timestamp}")
+        ).strip() or "ai-logs/issue-{issue_number}-{run_timestamp}"
+        ai_logs_index_name = str(ai_logs_conf_raw.get("index_file", "index.md")).strip() or "index.md"
+        ai_logs_dir = format_template(ai_logs_path_template, context, "ai_logs.path")
+        evidence_path = normalize_repo_path(str(Path(ai_logs_dir) / ai_logs_index_name))
 
         appendix_lines = [
-            "Codex-Input-Summary:",
-            f"- Issue: #{issue_number} {issue_title}",
-            f"- Request: {issue_summary}",
-            f"- Planner Prompt: {planner_prompt_summary}",
-            "Codex-Consideration-Summary:",
-            f"- Plan: {plan_summary}",
-            f"- Review: {review_summary}",
-            *attempt_lines,
-            f"- Source Logs: {run_dir}",
+            "Codex-Summary:",
+            f"- Problem: {clip_inline_text(problem_line, max_chars=max_chars)}",
+            f"- Decision: {decision_line}",
+            f"- Validation: {validation_line}",
+            f"- Risk: {risk_line}",
+            f"- Evidence: {evidence_path}",
         ]
         appendix_text = "\n".join(appendix_lines).strip()
         if len(appendix_text) > max_total_chars:
             appendix_text = clip_text(appendix_text, max_chars=max_total_chars).strip()
 
+        request_lines = [f"- {item}" for item in issue_points]
+        validation_result_lines = [f"- {item}" for item in last_validation_lines]
+        if not validation_result_lines:
+            validation_result_lines = ["- 検証結果なし"]
+
+        risk_lines = [f"- {item}" for item in review_points[:max_points]]
+        if not risk_lines:
+            risk_lines = ["- 重大な未解決リスクは記録されていません。"]
+
+        attempt_markdown_lines: list[str] = []
+        if attempt_rows:
+            for row in attempt_rows:
+                attempt_markdown_lines.extend(
+                    [
+                        f"- attempt {row['attempt']} ({row['status']})",
+                        f"  - 目的: {row['goal']}",
+                        f"  - 実施: {row['action']}",
+                        f"  - 結果: {row['validation']}",
+                    ]
+                )
+        else:
+            attempt_markdown_lines.append("- attempt記録なし")
+
         markdown_lines = [
-            "### Codex入力要約",
-            f"- Issue: `#{issue_number}` `{issue_title}`",
-            f"- Request: {issue_summary}",
-            f"- Planner Prompt: {planner_prompt_summary}",
+            "### TL;DR",
+            f"- 課題: {clip_inline_text(problem_line, max_chars=max_chars)}",
+            f"- 採用方針: {decision_line}",
+            f"- 検証結果: {validation_line}",
             "",
-            "### Codex検討要約",
-            f"- Plan: {plan_summary}",
-            f"- Review: {review_summary}",
-            *markdown_attempt_lines,
-            f"- Source Logs: `{run_dir}`",
+            "### 要求の再解釈",
+            *request_lines,
+            "",
+            "### Decision Log",
+            "| ID | 論点 | 選択肢 | 採用案 | 根拠 | 影響 |",
+            "|---|---|---|---|---|---|",
+            f"| D1 | スコープ | 最小変更 / 拡張変更 | {decision_line} | {issue_basis} | 変更範囲を限定し、実装速度を優先 |",
+            f"| D2 | 実装方式 | 既存構成順守 / 新規構成追加 | {implementation_basis} | {first_meaningful(planner_prompt_points, fallback='Planner指示')} | 保守性と追従性を確保 |",
+            f"| D3 | 検証方式 | 最小確認 / 包括確認 | {validation_line} | {quality_basis} | リグレッション検知性を確保 |",
+            "",
+            "### 試行ログ",
+            *attempt_markdown_lines,
+            "",
+            "### 検証結果",
+            *validation_result_lines,
+            "",
+            "### 残リスク・未解決",
+            *risk_lines,
+            "",
+            "### 証跡リンク",
+            f"- Issue: {issue_url or '(local file)'}",
+            f"- ai-logs: `{evidence_path}`",
+            f"- run_dir: `{run_dir}`",
         ]
         markdown_text = "\n".join(markdown_lines).strip()
     except (RuntimeError, OSError) as err:
@@ -334,9 +534,10 @@ def build_codex_commit_summary(
     write_text(
         run_dir / "codex_commit_summary_status.md",
         (
-            "- Codex要約を生成しました。\n"
+            "- Codex要約を生成しました（2層構成）。\n"
             f"- max_chars_per_item: `{max_chars}`\n"
             f"- max_attempts: `{max_attempts}`\n"
+            f"- max_points: `{max_points}`\n"
         ),
     )
     write_text(run_dir / "codex_commit_summary.md", appendix_text + "\n")
@@ -1699,7 +1900,7 @@ def main() -> int:
         "instruction_markdown": "",
         "validation_commands_markdown": "",
         "log_location_markdown": "",
-        "codex_commit_summary_markdown": "_Codex検討要約は未生成です。_",
+        "codex_commit_summary_markdown": "_Codex判断ログは未生成です。_",
         "plan_markdown": "",
         "validation_summary": "",
         "review_markdown": "_Reviewer step skipped._",

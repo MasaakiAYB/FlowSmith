@@ -50,6 +50,7 @@
     "required": true,
     "max_chars_per_item": 240,
     "max_attempts": 5,
+    "max_points": 3,
     "max_total_chars": 3000
   },
   "ai_logs": {

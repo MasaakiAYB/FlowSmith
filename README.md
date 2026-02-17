@@ -39,7 +39,10 @@ export GH_TOKEN='<your_github_token>'
 
 ## Codex要約（コミットログ）
 
-このフレームワークは、コミット前に次を抽出し、要約をコミットメッセージへ追記します。
+このフレームワークは、次の2層構成で Codex の検討を可視化します。
+
+- コミットメッセージ: `Problem / Decision / Validation / Risk / Evidence` の短要約
+- PR本文: `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク / 証跡リンク`
 
 - Codex へ与えた内容（Issue本文、planner prompt）
 - Codex の検討結果（plan/review、coder 出力と品質ゲート結果）
@@ -50,6 +53,7 @@ export GH_TOKEN='<your_github_token>'
 - `required`: 要約生成失敗時にジョブを失敗させるか
 - `max_chars_per_item`: 各要約項目の最大文字数
 - `max_attempts`: 要約対象の最大試行回数
+- `max_points`: PR本文に展開する要点数
 - `max_total_chars`: コミット追記要約の最大文字数
 
 ## Entire連携（任意）
