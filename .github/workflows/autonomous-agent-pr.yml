@@ -35,6 +35,8 @@ jobs:
       AGENT_PLANNER_CMD: ${{ secrets.AGENT_PLANNER_CMD }}
       AGENT_CODER_CMD: ${{ secrets.AGENT_CODER_CMD }}
       AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
+      AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - name: チェックアウト
         uses: actions/checkout@v4
@@ -45,6 +47,70 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Node.js セットアップ（エージェントCLI用）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Codex CLI インストール（標準）
+        run: |
+          if command -v codex >/dev/null 2>&1; then
+            codex --version
+            exit 0
+          fi
+          npm install -g @openai/codex
+          codex --version
+
+      - name: エージェントセットアップスクリプト実行（任意）
+        if: ${{ env.AGENT_SETUP_SCRIPT != '' }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$AGENT_SETUP_SCRIPT" > /tmp/agent_setup.sh
+          chmod +x /tmp/agent_setup.sh
+          /tmp/agent_setup.sh
+
+      - name: エージェントコマンド事前検証
+        run: |
+          python - <<'PY'
+          import os
+          import shlex
+          import shutil
+          import sys
+
+          specs = [
+              ("AGENT_PLANNER_CMD", True),
+              ("AGENT_CODER_CMD", True),
+              ("AGENT_REVIEWER_CMD", False),
+          ]
+          errors = []
+
+          for key, required in specs:
+              value = os.getenv(key, "").strip()
+              if not value:
+                  if required:
+                      errors.append(f"{key} が未設定です。")
+                  continue
+              try:
+                  parts = shlex.split(value)
+              except ValueError as err:
+                  errors.append(f"{key} のパースに失敗しました: {err}")
+                  continue
+              if not parts:
+                  errors.append(f"{key} が空コマンドです。")
+                  continue
+              command = parts[0]
+              if shutil.which(command) is None:
+                  errors.append(
+                      f"{key} の実行コマンド '{command}' が見つかりません。"
+                  )
+
+          if errors:
+              print("[agent-preflight] コマンド検証に失敗しました。", file=sys.stderr)
+              for item in errors:
+                  print(f"- {item}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
 
       - name: Entire CLI インストール
         run: |

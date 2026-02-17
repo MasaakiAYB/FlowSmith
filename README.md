@@ -118,7 +118,18 @@ python scripts/agent_pipeline.py \
 - `AGENT_PLANNER_CMD`
 - `AGENT_CODER_CMD`
 - `AGENT_REVIEWER_CMD`（任意）
+- `OPENAI_API_KEY`（任意。`codex` が API キー認証を使う場合）
+- `AGENT_SETUP_SCRIPT`（任意。追加ツールを入れるためのシェルスクリプト）
 - `CROSS_REPO_GH_TOKEN`（任意、クロスリポジトリPRでは推奨）
+
+ワークフロー内の標準インストール手順:
+
+1. `actions/setup-python@v5` で Python 3.12 をセットアップ
+2. `actions/setup-node@v4` で Node.js 22 をセットアップ
+3. `npm install -g @openai/codex` で `codex` CLI をインストール（既存ならスキップ）
+4. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
+5. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
+6. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
 
 ## 外部呼び出し受け口（ディスパッチ）
 
