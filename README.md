@@ -63,7 +63,8 @@ Workflow Artifact へ保存することを必須化しています（実装ブ�
 
 - UI変更が検出される条件: `ui_evidence.ui_extensions` または `ui_evidence.ui_path_keywords`
 - 画像証跡として認める条件: `ui_evidence.image_extensions`
-- 画像証跡の保存先（既定）: `run_dir/ui-evidence/`（artifact-only）
+- 画像の投入先（既定）: `ui_evidence.repo_dir`（`.flowsmith/ui-evidence/`。対象リポジトリ配下で書き込み可能）
+- 画像証跡の保存先（既定）: `ui_evidence.artifact_dir`（`run_dir/ui-evidence/`）
 - 必須条件を満たさない場合: コミット前にパイプラインを失敗させる
 - 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記し、PR本文に artifact 参照情報を出力する
 
@@ -72,6 +73,7 @@ Workflow Artifact へ保存することを必須化しています（実装ブ�
 - `enabled`: UI証跡チェックの有効/無効
 - `required`: UI変更時に画像が無い場合に失敗させるか
 - `delivery_mode`: `artifact-only`（既定）または `commit`
+- `repo_dir`: 証跡画像を投入する対象リポジトリ内ディレクトリ（既定: `.flowsmith/ui-evidence`）
 - `artifact_dir`: 実行ログ配下での証跡画像ディレクトリ
 - `ui_extensions`: UI変更として判定する拡張子
 - `ui_path_keywords`: UI変更として判定するパスキーワード

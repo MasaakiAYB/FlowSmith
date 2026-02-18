@@ -86,6 +86,7 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 - `enabled`: UI証跡チェックの有効/無効
 - `required`: UI変更時に画像証跡が無い場合に失敗させるか
 - `delivery_mode`: `artifact-only`（既定）または `commit`
+- `repo_dir`: 証跡画像を投入する対象リポジトリ内ディレクトリ（既定: `.flowsmith/ui-evidence`）
 - `artifact_dir`: 実行ログ配下での証跡画像ディレクトリ
 - `ui_extensions`: UI変更として判定する拡張子
 - `ui_path_keywords`: UI変更として判定するパスキーワード
@@ -95,7 +96,7 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 - `max_ui_files`: コミットメッセージに列挙するUI変更ファイルの最大件数
 - `max_images`: コミットメッセージに列挙する証跡画像の最大件数
 
-既定では有効です。UI変更が検出された場合、証跡画像が `run_dir/ui-evidence/`（artifact-only）に無いとコミット前に失敗します。
+既定では有効です。UI変更が検出された場合、証跡画像が `repo_dir` または `run_dir/ui-evidence/`（artifact-only）に無いとコミット前に失敗します。
 条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記し、PR本文に Workflow Artifact 参照情報を記載します。
 
 ## Entire CLI証跡設定（任意）
@@ -161,7 +162,7 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 - `{issue_number}`
 - `{project_id}`
 - `{target_repo}`
-- `{ui_evidence_dir}`（UI証跡画像の保存先。既定: `run_dir/ui-evidence`）
+- `{ui_evidence_dir}`（UI証跡画像の投入先。既定: `<repo_root>/.flowsmith/ui-evidence`）
 
 ## 再試行ポリシー
 

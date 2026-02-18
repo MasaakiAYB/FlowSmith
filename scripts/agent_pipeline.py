@@ -1280,6 +1280,28 @@ def resolve_run_dir_subpath(
     return normalized, resolved
 
 
+def resolve_ui_repo_evidence_dir(
+    *,
+    repo_root: Path,
+    ui_conf_raw: dict[str, Any],
+) -> tuple[str, Path]:
+    raw_value = str(ui_conf_raw.get("repo_dir") or ".flowsmith/ui-evidence").strip()
+    if not raw_value:
+        raw_value = ".flowsmith/ui-evidence"
+    relative = Path(raw_value)
+    if relative.is_absolute():
+        raise RuntimeError("Config 'ui_evidence.repo_dir' must be a relative path.")
+    normalized = normalize_repo_path(relative.as_posix())
+    if not normalized:
+        raise RuntimeError("Config 'ui_evidence.repo_dir' must not be empty.")
+    resolved = resolve_repo_relative_path(
+        normalized,
+        repo_root=repo_root,
+        setting_name="ui_evidence.repo_dir",
+    )
+    return normalized, resolved
+
+
 def matches_any_keyword(value: str, keywords: list[str]) -> bool:
     text = value.lower()
     return any(keyword in text for keyword in keywords if keyword)
@@ -1341,6 +1363,29 @@ def collect_repo_evidence_images(
             file_name, evidence_name_keywords
         ):
             evidence_paths.append(path)
+    return sorted(set(evidence_paths))
+
+
+def collect_repo_dir_evidence_images(
+    *,
+    repo_root: Path,
+    repo_evidence_dir: Path,
+    image_extensions: list[str],
+) -> list[str]:
+    if not repo_evidence_dir.exists():
+        return []
+    allowed = set(image_extensions)
+    evidence_paths: list[str] = []
+    for file_path in sorted(repo_evidence_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in allowed:
+            continue
+        try:
+            relative = file_path.resolve().relative_to(repo_root.resolve())
+        except ValueError:
+            continue
+        evidence_paths.append(normalize_repo_path(relative.as_posix()))
     return sorted(set(evidence_paths))
 
 
@@ -1442,6 +1487,10 @@ def build_ui_evidence_state(
         ui_conf_raw = {}
     if not isinstance(ui_conf_raw, dict):
         raise RuntimeError("Config 'ui_evidence' must be an object when specified.")
+    repo_evidence_dir_relative, repo_evidence_dir = resolve_ui_repo_evidence_dir(
+        repo_root=repo_root,
+        ui_conf_raw=ui_conf_raw,
+    )
 
     enabled = bool(ui_conf_raw.get("enabled", True))
     required = bool(ui_conf_raw.get("required", True))
@@ -1553,6 +1602,7 @@ def build_ui_evidence_state(
         "ui_evidence_status": "skipped",
         "ui_evidence_delivery_mode": delivery_mode,
         "ui_evidence_artifact_dir": evidence_dir_relative,
+        "ui_evidence_repo_dir": repo_evidence_dir_relative,
         "ui_evidence_artifact_name": "",
         "ui_evidence_artifact_url": "",
         "ui_evidence_workflow_run_url": "",
@@ -1605,6 +1655,12 @@ def build_ui_evidence_state(
         evidence_path_keywords=evidence_path_keywords,
         evidence_name_keywords=evidence_name_keywords,
     )
+    repo_dir_evidence = collect_repo_dir_evidence_images(
+        repo_root=repo_root,
+        repo_evidence_dir=repo_evidence_dir,
+        image_extensions=image_extensions,
+    )
+    evidence_from_repo = sorted(set(evidence_from_repo + repo_dir_evidence))
     copy_repo_evidence_images_to_run_dir(
         repo_root=repo_root,
         source_paths=evidence_from_repo,
@@ -1620,7 +1676,7 @@ def build_ui_evidence_state(
         message = (
             "UI変更が検出されましたが、証跡画像が見つかりません。 "
             f"証跡画像（{', '.join(image_extensions)}）を "
-            f"`{evidence_dir}` に配置するか、"
+            f"`{repo_evidence_dir}` または `{evidence_dir}` に配置するか、"
             "evidence_path_keywords/evidence_name_keywords に一致する画像ファイルを追加してください。"
         )
         if required:
@@ -2854,6 +2910,15 @@ def main() -> int:
     run_dir = control_root / ".agent" / "runs" / runtime["run_namespace"] / f"{timestamp}-issue-{issue['number']}"
     run_dir.mkdir(parents=True, exist_ok=False)
     workflow_artifact_meta = detect_workflow_artifact_metadata()
+    ui_conf_for_context = config.get("ui_evidence", {})
+    if ui_conf_for_context is None:
+        ui_conf_for_context = {}
+    if not isinstance(ui_conf_for_context, dict):
+        raise RuntimeError("Config 'ui_evidence' must be an object when specified.")
+    ui_repo_evidence_relative, ui_repo_evidence_dir = resolve_ui_repo_evidence_dir(
+        repo_root=target_repo_root,
+        ui_conf_raw=ui_conf_for_context,
+    )
 
     task_file = run_dir / "task.md"
     plan_file = run_dir / "plan.md"
@@ -2927,11 +2992,13 @@ def main() -> int:
         "ui_evidence_image_files": [],
         "ui_evidence_commit_image_files": [],
         "ui_evidence_restored_paths": [],
-        "ui_evidence_dir": str((run_dir / "ui-evidence").resolve()),
+        "ui_evidence_repo_dir": ui_repo_evidence_relative,
+        "ui_evidence_dir": str(ui_repo_evidence_dir.resolve()),
         "ui_evidence_appendix": "",
         "head_commit": "",
     }
-    Path(context["ui_evidence_dir"]).mkdir(parents=True, exist_ok=True)
+    ui_repo_evidence_dir.mkdir(parents=True, exist_ok=True)
+    Path(run_dir / "ui-evidence").mkdir(parents=True, exist_ok=True)
 
     context["instruction_markdown"] = render_issue_instruction_markdown(
         issue_number=issue["number"],

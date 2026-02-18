@@ -59,6 +59,7 @@
     "enabled": true,
     "required": true,
     "delivery_mode": "artifact-only",
+    "repo_dir": ".flowsmith/ui-evidence",
     "artifact_dir": "ui-evidence",
     "ui_extensions": [
       ".html",
