@@ -32,6 +32,12 @@
 - UI証跡状態: `{ui_evidence_status}`
 - UI証跡artifact名: `{ui_evidence_artifact_name}`
 - UI証跡artifactリンク: {ui_evidence_artifact_url}
+- UI証跡ai-logsブランチ: `{ui_evidence_ai_logs_branch}`
+- UI証跡ai-logsリンク:
+{ui_evidence_ai_logs_links_markdown}
+
+### UI画像プレビュー（ai-logs）
+{ui_evidence_ai_logs_embeds_markdown}
 
 ## AIエージェント実行ログ
 

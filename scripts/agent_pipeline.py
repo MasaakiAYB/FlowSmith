@@ -803,6 +803,115 @@ def render_validation_commands_markdown(commands: list[str]) -> str:
     return "\n".join(f"- `{item}`" for item in commands)
 
 
+def resolve_ui_artifact_dir_from_config(config: dict[str, Any]) -> str:
+    ui_conf_raw = config.get("ui_evidence", {})
+    if ui_conf_raw is None:
+        ui_conf_raw = {}
+    if not isinstance(ui_conf_raw, dict):
+        return "ui-evidence"
+    raw_value = str(ui_conf_raw.get("artifact_dir") or "ui-evidence").strip()
+    if not raw_value:
+        raw_value = "ui-evidence"
+    return normalize_repo_path(Path(raw_value).as_posix()).strip("/")
+
+
+def resolve_ui_image_extensions_from_config(config: dict[str, Any]) -> list[str]:
+    ui_conf_raw = config.get("ui_evidence", {})
+    if ui_conf_raw is None:
+        ui_conf_raw = {}
+    if not isinstance(ui_conf_raw, dict):
+        return [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+    return normalize_extensions(
+        parse_string_list(
+            ui_conf_raw.get("image_extensions"),
+            default=[".png", ".jpg", ".jpeg", ".webp", ".gif"],
+            name="ui_evidence.image_extensions",
+        )
+        or [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+    )
+
+
+def build_blob_url(*, repo_slug: str, ref: str, path: str) -> str:
+    normalized_repo = normalize_repo_slug(repo_slug)
+    normalized_ref = str(ref).strip()
+    normalized_path = normalize_repo_path(path).strip()
+    if not normalized_repo or not normalized_ref or not normalized_path:
+        return ""
+    return f"https://github.com/{normalized_repo}/blob/{normalized_ref}/{normalized_path}"
+
+
+def build_ui_evidence_ai_logs_context(
+    *,
+    context: dict[str, Any],
+    config: dict[str, Any],
+    repo_slug: str,
+) -> dict[str, Any]:
+    default_state = {
+        "ui_evidence_ai_logs_branch": "",
+        "ui_evidence_ai_logs_paths": [],
+        "ui_evidence_ai_logs_urls": [],
+        "ui_evidence_ai_logs_links_markdown": "- `(なし)`",
+        "ui_evidence_ai_logs_embeds_markdown": "_画像はありません。_",
+    }
+
+    ai_logs_dir = normalize_repo_path(str(context.get("ai_logs_dir", "")).strip())
+    if not ai_logs_dir or ai_logs_dir == "未保存":
+        return default_state
+
+    source_paths: list[str] = []
+    for key in ("ai_logs_published_paths", "ai_logs_paths"):
+        raw = context.get(key, [])
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            text = normalize_repo_path(str(item).strip())
+            if text:
+                source_paths.append(text)
+    if not source_paths:
+        return default_state
+
+    ui_artifact_dir = resolve_ui_artifact_dir_from_config(config)
+    prefix = normalize_repo_path(str(Path(ai_logs_dir) / ui_artifact_dir)).rstrip("/") + "/"
+    prefix_lower = prefix.lower()
+    allowed_extensions = set(resolve_ui_image_extensions_from_config(config))
+    ui_paths = sorted(
+        {
+            path
+            for path in source_paths
+            if path.lower().startswith(prefix_lower)
+            and Path(path).suffix.lower() in allowed_extensions
+        }
+    )
+    if not ui_paths:
+        return default_state
+
+    ai_logs_mode = str(context.get("ai_logs_publish_mode", "same-branch")).strip().lower() or "same-branch"
+    ai_logs_branch = str(context.get("ai_logs_publish_branch", "")).strip()
+    if ai_logs_mode != "dedicated-branch":
+        ai_logs_branch = str(context.get("branch_name", "")).strip()
+
+    urls: list[str] = []
+    for path in ui_paths:
+        url = build_blob_url(repo_slug=repo_slug, ref=ai_logs_branch, path=path)
+        if url:
+            urls.append(url)
+
+    links_markdown = "\n".join(f"- {url}" for url in urls[:8]) or "- `(なし)`"
+    embeds_markdown = "\n".join(
+        f"![UI Evidence {idx + 1}]({url})"
+        for idx, url in enumerate(urls[:4])
+    ) or "_画像はありません。_"
+
+    return {
+        **default_state,
+        "ui_evidence_ai_logs_branch": ai_logs_branch,
+        "ui_evidence_ai_logs_paths": ui_paths,
+        "ui_evidence_ai_logs_urls": urls,
+        "ui_evidence_ai_logs_links_markdown": links_markdown,
+        "ui_evidence_ai_logs_embeds_markdown": embeds_markdown,
+    }
+
+
 def render_log_location_markdown(context: dict[str, Any]) -> str:
     ai_logs_status = str(context.get("ai_logs_status", "unknown")).strip() or "unknown"
     ai_logs_dir = str(context.get("ai_logs_dir", "未保存")).strip() or "未保存"
@@ -819,6 +928,13 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
     ui_evidence_artifact_url = str(context.get("ui_evidence_artifact_url", "")).strip()
     ui_evidence_file_count = len(context.get("ui_evidence_image_files", []))
     ui_evidence_restored_paths = context.get("ui_evidence_restored_paths", [])
+    ui_evidence_ai_logs_branch = str(context.get("ui_evidence_ai_logs_branch", "")).strip()
+    ui_evidence_ai_logs_urls_raw = context.get("ui_evidence_ai_logs_urls", [])
+    ui_evidence_ai_logs_urls = [
+        str(item).strip()
+        for item in (ui_evidence_ai_logs_urls_raw if isinstance(ui_evidence_ai_logs_urls_raw, list) else [])
+        if str(item).strip()
+    ]
     run_dir = str(context.get("run_dir", "")).strip()
     entire_trace_file = str(context.get("entire_trace_file", "")).strip()
 
@@ -848,6 +964,13 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
         lines.append(f"- UI証跡artifact名: `{ui_evidence_artifact_name}`")
     if ui_evidence_artifact_url:
         lines.append(f"- UI証跡artifactリンク: {ui_evidence_artifact_url}")
+    if ui_evidence_ai_logs_branch:
+        lines.append(f"- UI証跡保存ブランチ(ai-logs): `{ui_evidence_ai_logs_branch}`")
+    if ui_evidence_ai_logs_urls:
+        lines.append(
+            "- UI証跡リンク(ai-logs): "
+            + ", ".join(ui_evidence_ai_logs_urls[:4])
+        )
     if isinstance(ui_evidence_restored_paths, list) and ui_evidence_restored_paths:
         lines.append(
             "- UI証跡のためコミットから除外した画像: "
@@ -1539,6 +1662,7 @@ def build_ui_evidence_state(
     run_dir: Path,
     changed_paths: list[str],
     config: dict[str, Any],
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ui_conf_raw = config.get("ui_evidence", {})
     if ui_conf_raw is None:
@@ -1776,6 +1900,19 @@ def build_ui_evidence_state(
         ui_lines.append(
             f"  - ... ({len(collected_evidence_files) - max_images} files omitted)"
         )
+    ai_logs_urls: list[str] = []
+    ai_logs_branch = ""
+    if isinstance(context, dict):
+        ai_logs_branch = str(context.get("ui_evidence_ai_logs_branch", "")).strip()
+        urls_raw = context.get("ui_evidence_ai_logs_urls", [])
+        if isinstance(urls_raw, list):
+            ai_logs_urls = [str(item).strip() for item in urls_raw if str(item).strip()]
+    if ai_logs_branch:
+        ui_lines.append(f"- AI Logs Branch: `{ai_logs_branch}`")
+    if ai_logs_urls:
+        ui_lines.append("- Evidence Images (ai-logs):")
+        for url in ai_logs_urls[:max_images]:
+            ui_lines.append(f"  - {url}")
 
     return {
         **default_state,
@@ -1797,6 +1934,7 @@ def commit_changes(
     *,
     run_dir: Path | None = None,
     config: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
     ignore_paths: list[str] | None = None,
     force_add_paths: list[str] | None = None,
     required_paths: list[str] | None = None,
@@ -1868,6 +2006,7 @@ def commit_changes(
             run_dir=run_dir,
             changed_paths=meaningful_changes,
             config=config,
+            context=context,
         )
 
         staged_names = git(["diff", "--cached", "--name-only"], cwd=repo_root)
@@ -2300,6 +2439,7 @@ def save_ai_logs_bundle(
         "ai_logs_index_url": "",
         "ai_logs_file_count": 0,
         "ai_logs_paths": [],
+        "ai_logs_published_paths": [],
     }
     if not enabled:
         write_text(run_dir / "ai_logs_status.md", "- ai-logs 保存は無効です。\n")
@@ -2319,17 +2459,18 @@ def save_ai_logs_bundle(
             setting_name="ai_logs.path",
         )
 
-        source_files = sorted(path for path in run_dir.iterdir() if path.is_file())
+        source_files = sorted(path for path in run_dir.rglob("*") if path.is_file())
         if not source_files:
             raise RuntimeError(f"ai-logs に保存するソースファイルがありません: {run_dir}")
 
         copied_relative_paths: list[str] = []
         for source in source_files:
-            destination = logs_dir_path / source.name
+            relative_tail = source.relative_to(run_dir)
+            destination = logs_dir_path / relative_tail
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
             copied_relative_paths.append(
-                normalize_repo_path(str(Path(dir_relative_path) / source.name))
+                normalize_repo_path(str(Path(dir_relative_path) / relative_tail))
             )
 
         index_relative_path = normalize_repo_path(str(Path(dir_relative_path) / index_file_name))
@@ -2486,6 +2627,7 @@ def publish_ai_logs_to_dedicated_branch(
         "ai_logs_publish_branch": branch_name,
         "ai_logs_publish_status": "skipped",
         "ai_logs_publish_commit": "",
+        "ai_logs_published_paths": [],
     }
     if mode != "dedicated-branch":
         return default_state
@@ -2621,6 +2763,7 @@ def publish_ai_logs_to_dedicated_branch(
         "ai_logs_publish_status": "published",
         "ai_logs_publish_commit": published_commit,
         "ai_logs_index_url": index_url,
+        "ai_logs_published_paths": ai_logs_paths,
         # コード変更用ブランチには ai-logs を含めない。
         "ai_logs_paths": [],
     }
@@ -3035,6 +3178,7 @@ def main() -> int:
         "ai_logs_publish_commit": "",
         "ai_logs_file_count": 0,
         "ai_logs_paths": [],
+        "ai_logs_published_paths": [],
         "codex_commit_summary_required": True,
         "codex_commit_summary_status": "skipped",
         "codex_commit_summary_appendix": "",
@@ -3050,6 +3194,11 @@ def main() -> int:
         "ui_evidence_image_files": [],
         "ui_evidence_commit_image_files": [],
         "ui_evidence_restored_paths": [],
+        "ui_evidence_ai_logs_branch": "",
+        "ui_evidence_ai_logs_paths": [],
+        "ui_evidence_ai_logs_urls": [],
+        "ui_evidence_ai_logs_links_markdown": "- `(なし)`",
+        "ui_evidence_ai_logs_embeds_markdown": "_画像はありません。_",
         "ui_evidence_repo_dir": ui_repo_evidence_relative,
         "ui_evidence_dir": str(ui_repo_evidence_dir.resolve()),
         "ui_evidence_appendix": "",
@@ -3229,6 +3378,13 @@ def main() -> int:
         repo_slug=repo_slug,
     )
     context.update(ai_logs_publish_state)
+    context.update(
+        build_ui_evidence_ai_logs_context(
+            context=context,
+            config=config,
+            repo_slug=repo_slug,
+        )
+    )
     context["log_location_markdown"] = render_log_location_markdown(context)
 
     removed_stray_outputs = cleanup_untracked_coder_outputs(target_repo_root)
@@ -3278,6 +3434,7 @@ def main() -> int:
         commit_message,
         run_dir=run_dir,
         config=config,
+        context=context,
         ignore_paths=ignored_paths,
         force_add_paths=force_add_paths,
         required_paths=required_paths,

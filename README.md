@@ -66,7 +66,8 @@ Workflow Artifact へ保存することを必須化しています（実装ブ�
 - 画像の投入先（既定）: `ui_evidence.repo_dir`（`.flowsmith/ui-evidence/`。対象リポジトリ配下で書き込み可能）
 - 画像証跡の保存先（既定）: `ui_evidence.artifact_dir`（`run_dir/ui-evidence/`）
 - 必須条件を満たさない場合: コミット前にパイプラインを失敗させる
-- 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記し、PR本文に artifact 参照情報を出力する
+- 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記し、`ai-logs` ブランチ上の画像リンクを出力する
+- PR本文では `ai-logs` ブランチ上の画像をインライン表示する（`artifact` は補助情報として保持）
 
 `ui_evidence` 設定例（`.agent/pipeline.json`）:
 
@@ -99,6 +100,8 @@ PR本文には次の必須セクションを出力します。
 また、実行ログは対象リポジトリ内の `ai-logs/issue-<番号>-<timestamp>/` へ生成したうえで、
 専用ブランチ（既定: `agent-ai-logs`）へ集約して `index.md` リンクをPR本文へ記載します。
 このため、実装PR用ブランチ（`main` 向け）には `ai-logs/` を含めません。
+UI証跡画像（`run_dir/ui-evidence`）も `ai-logs/.../ui-evidence/` として同じ専用ブランチへ集約し、
+PR本文で直接プレビューできるURLを埋め込みます。
 `ai_logs.required: true` または `ai_logs.publish.required: true` の場合、保存/集約に失敗するとパイプラインは失敗します。
 
 `ai_logs` 設定例（`.agent/pipeline.json`）:

@@ -97,7 +97,8 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 - `max_images`: コミットメッセージに列挙する証跡画像の最大件数
 
 既定では有効です。UI変更が検出された場合、証跡画像が `repo_dir` または `run_dir/ui-evidence/`（artifact-only）に無いとコミット前に失敗します。
-条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記し、PR本文に Workflow Artifact 参照情報を記載します。
+条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記し、`ai-logs` ブランチ上の画像リンクを記載します。
+PR本文には `ai-logs` ブランチ上の画像をインライン表示し、Workflow Artifact は補助情報として記載します。
 
 ## Entire CLI証跡設定（任意）
 
@@ -120,6 +121,7 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 既定は `publish.mode: dedicated-branch` です。`ai-logs` は専用ブランチへ集約され、実装PRブランチには含めません。
 `required: true` または `publish.required: true` の場合、保存/集約に失敗すると PR 作成前に失敗します。
 PR本文には専用ブランチ上の `ai-logs` インデックスファイルへのリンクを埋め込みます。
+UI証跡画像も `ai-logs/.../ui-evidence/` 配下へ同時保存され、PR本文で直接表示できるURLを生成します。
 
 ## 差し替え可能なエージェントコマンド
 
