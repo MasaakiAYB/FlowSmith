@@ -12,8 +12,8 @@
 8. Codex への入力（Issue本文 / planner prompt）と検討結果（plan/review/coder出力/品質ゲート）を抽出し、コミットメッセージ要約を生成する
 9. `run_dir` の実行ログを `ai-logs/issue-<番号>-<timestamp>/` に保存し、専用ブランチ（既定: `agent-ai-logs`）へ集約する
 10. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
-11. `.agent/templates/pr_body.md` から PR 本文を生成する（指示内容/検証コマンド/ログの場所を必須出力）
-12. 対象リポジトリに PR を作成または更新する
+11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
+12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` ラベル付与を試行したうえで PR を作成または更新する
 13. 人間レビューでマージ可否を判断する
 
 ## 外部呼び出し受け口（ディスパッチ）
@@ -75,7 +75,7 @@
 - `max_points`: PR本文に展開する要点数
 - `max_total_chars`: コミット追記要約の最大文字数
 
-既定では有効で、コミットメッセージへ `Codex-Summary`（`Problem/Decision/Validation/Risk`）を追記し、
+既定では有効で、コミットメッセージへ `Codex-Context`（`指示/試行錯誤/設計根拠` の固定3見出し）を追記し、
 末尾に `Codex-Log-Reference` としてログの場所を保存します。
 PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク・未解決 / 証跡リンク` を表示します。
 
@@ -85,14 +85,18 @@ PR本文には `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検�
 
 - `enabled`: UI証跡チェックの有効/無効
 - `required`: UI変更時に画像証跡が無い場合に失敗させるか
+- `delivery_mode`: `artifact-only`（既定）または `commit`
+- `artifact_dir`: 実行ログ配下での証跡画像ディレクトリ
 - `ui_extensions`: UI変更として判定する拡張子
 - `ui_path_keywords`: UI変更として判定するパスキーワード
 - `image_extensions`: 証跡画像として許可する拡張子（スクリーンショット/GIF）
+- `evidence_path_keywords`: リポジトリ内画像を証跡として扱うパスキーワード
+- `evidence_name_keywords`: リポジトリ内画像を証跡として扱うファイル名キーワード
 - `max_ui_files`: コミットメッセージに列挙するUI変更ファイルの最大件数
-- `max_images`: コミットメッセージに埋め込む画像の最大件数
+- `max_images`: コミットメッセージに列挙する証跡画像の最大件数
 
-既定では有効です。UI変更が検出された場合、画像証跡がコミット対象に無いとコミット前に失敗します。
-条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記します。
+既定では有効です。UI変更が検出された場合、証跡画像が `run_dir/ui-evidence/`（artifact-only）に無いとコミット前に失敗します。
+条件を満たすと、コミットメッセージ末尾へ `UI-Evidence` セクションを自動追記し、PR本文に Workflow Artifact 参照情報を記載します。
 
 ## Entire CLI証跡設定（任意）
 
@@ -157,6 +161,7 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 - `{issue_number}`
 - `{project_id}`
 - `{target_repo}`
+- `{ui_evidence_dir}`（UI証跡画像の保存先。既定: `run_dir/ui-evidence`）
 
 ## 再試行ポリシー
 
@@ -169,6 +174,6 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 - 既定の品質ゲートをプロジェクト固有のゲートに置き換える
 - ブランチ保護で CI とコードレビューを必須化する
 - ワークフローにセキュリティスキャンとライセンスポリシー検査を追加する
-- 必要なら `.agent/runs/` を artifact として保管する
+- `.agent/runs/` の artifact 保存を有効化し、UI証跡を含めて追跡可能にする
 - クロスリポジトリ操作では `CROSS_REPO_GH_TOKEN` の利用を優先する
 - dispatch 受け口は `DISPATCH_SHARED_SECRET` で保護する

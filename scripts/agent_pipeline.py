@@ -208,6 +208,88 @@ def clip_inline_text(value: str, *, max_chars: int) -> str:
     return normalized[:end].rstrip() + suffix
 
 
+CONVENTIONAL_PR_TYPES = (
+    "feat",
+    "fix",
+    "docs",
+    "chore",
+    "refactor",
+    "perf",
+    "test",
+    "build",
+    "ci",
+    "revert",
+)
+
+
+def strip_issue_title_prefixes(title: str) -> str:
+    cleaned = normalize_inline_text(title)
+    if not cleaned:
+        return ""
+
+    while True:
+        updated = re.sub(
+            r"^(?:\[[^\]]+\]|【[^】]+】|\([^)]+\))\s*",
+            "",
+            cleaned,
+        ).strip()
+        if updated == cleaned:
+            break
+        cleaned = updated
+
+    cleaned = re.sub(
+        r"^(?:エージェント作業|agent task|agent)\s*[:：\-]?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    return cleaned
+
+
+def has_conventional_pr_prefix(title: str) -> bool:
+    pattern = (
+        r"^(?:"
+        + "|".join(CONVENTIONAL_PR_TYPES)
+        + r")(?:\([^)]+\))?:\s+\S"
+    )
+    return bool(re.match(pattern, title, flags=re.IGNORECASE))
+
+
+def infer_pr_type_from_issue(*, issue_title: str, issue_labels: list[str]) -> str:
+    corpus_parts = [issue_title]
+    corpus_parts.extend(issue_labels)
+    corpus = " ".join(str(item) for item in corpus_parts if str(item).strip()).lower()
+
+    if any(token in corpus for token in ("bug", "fix", "hotfix", "不具合", "バグ", "障害")):
+        return "fix"
+    if any(token in corpus for token in ("doc", "docs", "documentation", "ドキュメント")):
+        return "docs"
+    if any(token in corpus for token in ("refactor", "リファクタ")):
+        return "refactor"
+    if any(token in corpus for token in ("test", "テスト")):
+        return "test"
+    if any(token in corpus for token in ("perf", "performance", "最適化")):
+        return "perf"
+    if any(token in corpus for token in ("ci", "build", "infra", "devops")):
+        return "build"
+    if any(token in corpus for token in ("chore", "maintain", "maintenance", "運用")):
+        return "chore"
+    return "feat"
+
+
+def build_default_pr_title(*, issue_title: str, issue_labels: list[str]) -> str:
+    normalized = strip_issue_title_prefixes(issue_title)
+    if not normalized:
+        normalized = normalize_inline_text(issue_title) or "update"
+    if has_conventional_pr_prefix(normalized):
+        return normalized
+    pr_type = infer_pr_type_from_issue(
+        issue_title=normalized,
+        issue_labels=issue_labels,
+    )
+    return f"{pr_type}: {normalized}"
+
+
 def strip_markdown_prefix(line: str) -> str:
     text = line.strip()
     if not text:
@@ -471,16 +553,90 @@ def build_codex_commit_summary(
         ai_logs_dir = format_template(ai_logs_path_template, context, "ai_logs.path")
         evidence_path = normalize_repo_path(str(Path(ai_logs_dir) / ai_logs_index_name))
 
-        appendix_lines = [
-            "Codex-Summary:",
-            f"- Problem: {clip_inline_text(problem_line, max_chars=max_chars)}",
-            f"- Decision: {decision_line}",
-            f"- Validation: {validation_line}",
-            f"- Risk: {risk_line}",
-            "",
-            "Codex-Log-Reference:",
-            f"- AI Logs: {evidence_path}",
+        planner_basis = first_meaningful(
+            planner_prompt_points,
+            fallback="Planner指示",
+        )
+
+        def collect_unique_lines(candidates: list[str], *, limit: int) -> list[str]:
+            lines: list[str] = []
+            seen: set[str] = set()
+            for raw in candidates:
+                normalized = clip_inline_text(raw, max_chars=max_chars)
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                lines.append(normalized)
+                if len(lines) >= limit:
+                    break
+            return lines
+
+        instruction_candidates: list[str] = [
+            f"Issue: #{issue_number} {issue_title}",
+            f"Issue本文の要点: {issue_basis}",
+            f"Plannerへ渡した方針: {planner_basis}",
         ]
+        instruction_candidates.extend(
+            f"Issue要求: {item}"
+            for item in issue_points[:max_points]
+            if item and item not in {"(missing)", "(empty)"}
+        )
+        instruction_lines = collect_unique_lines(
+            instruction_candidates,
+            limit=max(max_points + 1, 3),
+        )
+        if not instruction_lines:
+            instruction_lines = ["Issue指示情報を抽出できませんでした。"]
+
+        trial_candidates: list[str] = []
+        for row in attempt_rows:
+            trial_candidates.append(
+                "attempt "
+                f"{row['attempt']} [{row['status']}]: "
+                f"目的={clip_inline_text(str(row['goal']), max_chars=max_chars)} / "
+                f"実施={clip_inline_text(str(row['action']), max_chars=max_chars)} / "
+                f"結果={clip_inline_text(str(row['validation']), max_chars=max_chars)}"
+            )
+        if not trial_candidates:
+            trial_candidates.append(
+                f"単一試行で完了。検証結果: {clip_inline_text(validation_line, max_chars=max_chars)}"
+            )
+        trial_lines = collect_unique_lines(
+            trial_candidates,
+            limit=max(max_attempts, 1),
+        )
+
+        design_candidates: list[str] = [
+            f"採用設計: {decision_line}",
+            f"設計根拠(Issue): {issue_basis}",
+            f"設計根拠(Planner): {planner_basis}",
+            f"設計根拠(Plan): {implementation_basis}",
+            f"検証方針: {quality_basis}",
+            f"リスク判断: {risk_line}",
+        ]
+        design_lines = collect_unique_lines(
+            design_candidates,
+            limit=max(max_points + 2, 4),
+        )
+        if not design_lines:
+            design_lines = ["設計根拠を抽出できませんでした。"]
+
+        appendix_lines = [
+            "Codex-Context:",
+            "- 指示:",
+        ]
+        appendix_lines.extend(f"  - {item}" for item in instruction_lines)
+        appendix_lines.append("- 試行錯誤:")
+        appendix_lines.extend(f"  - {item}" for item in trial_lines)
+        appendix_lines.append("- 設計根拠:")
+        appendix_lines.extend(f"  - {item}" for item in design_lines)
+        appendix_lines.extend(
+            [
+                "",
+                "Codex-Log-Reference:",
+                f"- AI Logs: {evidence_path}",
+            ]
+        )
         appendix_text = "\n".join(appendix_lines).strip()
         if len(appendix_text) > max_total_chars:
             appendix_text = clip_text(appendix_text, max_chars=max_total_chars).strip()
@@ -521,7 +677,7 @@ def build_codex_commit_summary(
             "| ID | 論点 | 選択肢 | 採用案 | 根拠 | 影響 |",
             "|---|---|---|---|---|---|",
             f"| D1 | スコープ | 最小変更 / 拡張変更 | {decision_line} | {issue_basis} | 変更範囲を限定し、実装速度を優先 |",
-            f"| D2 | 実装方式 | 既存構成順守 / 新規構成追加 | {implementation_basis} | {first_meaningful(planner_prompt_points, fallback='Planner指示')} | 保守性と追従性を確保 |",
+            f"| D2 | 実装方式 | 既存構成順守 / 新規構成追加 | {implementation_basis} | {planner_basis} | 保守性と追従性を確保 |",
             f"| D3 | 検証方式 | 最小確認 / 包括確認 | {validation_line} | {quality_basis} | リグレッション検知性を確保 |",
             "",
             "### 試行ログ",
@@ -603,6 +759,13 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
     ai_logs_publish_status = str(context.get("ai_logs_publish_status", "unknown")).strip() or "unknown"
     ai_logs_publish_branch = str(context.get("ai_logs_publish_branch", "")).strip()
     ai_logs_publish_commit = str(context.get("ai_logs_publish_commit", "")).strip()
+    ui_evidence_status = str(context.get("ui_evidence_status", "unknown")).strip() or "unknown"
+    ui_evidence_delivery_mode = str(context.get("ui_evidence_delivery_mode", "")).strip() or "commit"
+    ui_evidence_artifact_dir = str(context.get("ui_evidence_artifact_dir", "")).strip()
+    ui_evidence_artifact_name = str(context.get("ui_evidence_artifact_name", "")).strip()
+    ui_evidence_artifact_url = str(context.get("ui_evidence_artifact_url", "")).strip()
+    ui_evidence_file_count = len(context.get("ui_evidence_image_files", []))
+    ui_evidence_restored_paths = context.get("ui_evidence_restored_paths", [])
     run_dir = str(context.get("run_dir", "")).strip()
     entire_trace_file = str(context.get("entire_trace_file", "")).strip()
 
@@ -623,6 +786,20 @@ def render_log_location_markdown(context: dict[str, Any]) -> str:
         lines.append("- AIログリンク: `(コミット後に生成)`")
     if run_dir:
         lines.append(f"- FlowSmith 実行ログ(ローカル): `{run_dir}`")
+    lines.append(f"- UI証跡状態: `{ui_evidence_status}`")
+    lines.append(f"- UI証跡モード: `{ui_evidence_delivery_mode}`")
+    if ui_evidence_artifact_dir:
+        lines.append(f"- UI証跡ディレクトリ(artifact): `{ui_evidence_artifact_dir}`")
+    lines.append(f"- UI証跡ファイル数: `{ui_evidence_file_count}`")
+    if ui_evidence_artifact_name:
+        lines.append(f"- UI証跡artifact名: `{ui_evidence_artifact_name}`")
+    if ui_evidence_artifact_url:
+        lines.append(f"- UI証跡artifactリンク: {ui_evidence_artifact_url}")
+    if isinstance(ui_evidence_restored_paths, list) and ui_evidence_restored_paths:
+        lines.append(
+            "- UI証跡のためコミットから除外した画像: "
+            + ", ".join(f"`{normalize_repo_path(str(item))}`" for item in ui_evidence_restored_paths[:8])
+        )
     if entire_trace_file and entire_trace_file != "未登録":
         lines.append(f"- Entire 明示証跡: `{entire_trace_file}`")
     return "\n".join(lines)
@@ -1081,8 +1258,182 @@ def normalize_extensions(values: list[str]) -> list[str]:
     return sorted(set(result))
 
 
+def resolve_run_dir_subpath(
+    *,
+    run_dir: Path,
+    value: str,
+    setting_name: str,
+) -> tuple[str, Path]:
+    relative = Path(value)
+    if relative.is_absolute():
+        raise RuntimeError(f"Config '{setting_name}' must be a relative path.")
+    normalized = normalize_repo_path(relative.as_posix())
+    if not normalized:
+        raise RuntimeError(f"Config '{setting_name}' must not be empty.")
+    resolved = (run_dir / normalized).resolve()
+    try:
+        resolved.relative_to(run_dir)
+    except ValueError as err:
+        raise RuntimeError(
+            f"Config '{setting_name}' points outside run_dir: {value}"
+        ) from err
+    return normalized, resolved
+
+
+def matches_any_keyword(value: str, keywords: list[str]) -> bool:
+    text = value.lower()
+    return any(keyword in text for keyword in keywords if keyword)
+
+
+def detect_workflow_artifact_metadata() -> dict[str, str]:
+    repository = os.getenv("GITHUB_REPOSITORY", "").strip()
+    run_id = os.getenv("GITHUB_RUN_ID", "").strip()
+    run_attempt = os.getenv("GITHUB_RUN_ATTEMPT", "").strip()
+    server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com").strip() or "https://github.com"
+    run_url = ""
+    if repository and run_id:
+        run_url = f"{server_url}/{repository}/actions/runs/{run_id}"
+    artifact_name = os.getenv("FLOWSMITH_RUN_ARTIFACT_NAME", "").strip()
+    if not artifact_name and run_id:
+        suffix = run_attempt or "1"
+        artifact_name = f"agent-run-{run_id}-{suffix}"
+    artifact_url = f"{run_url}#artifacts" if run_url else ""
+    return {
+        "workflow_run_url": run_url,
+        "run_artifact_name": artifact_name,
+        "run_artifact_url": artifact_url,
+    }
+
+
+def collect_run_dir_evidence_images(
+    *,
+    evidence_dir: Path,
+    evidence_dir_relative: str,
+    image_extensions: list[str],
+) -> list[str]:
+    if not evidence_dir.exists():
+        return []
+    allowed = set(image_extensions)
+    relative_paths: list[str] = []
+    for file_path in sorted(evidence_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in allowed:
+            continue
+        relative_tail = file_path.relative_to(evidence_dir)
+        relative_paths.append(
+            normalize_repo_path(str(Path(evidence_dir_relative) / relative_tail))
+        )
+    return relative_paths
+
+
+def collect_repo_evidence_images(
+    *,
+    changed_image_paths: list[str],
+    evidence_path_keywords: list[str],
+    evidence_name_keywords: list[str],
+) -> list[str]:
+    evidence_paths: list[str] = []
+    for path in changed_image_paths:
+        lowered = path.lower()
+        file_name = Path(lowered).name
+        if matches_any_keyword(lowered, evidence_path_keywords) or matches_any_keyword(
+            file_name, evidence_name_keywords
+        ):
+            evidence_paths.append(path)
+    return sorted(set(evidence_paths))
+
+
+def to_evidence_filename(path: str, *, used_names: set[str]) -> str:
+    raw = Path(path)
+    suffix = raw.suffix.lower()
+    stem = slugify(raw.stem or raw.name, max_len=50)
+    candidate = f"{stem}{suffix}"
+    index = 2
+    while candidate in used_names:
+        candidate = f"{stem}-{index}{suffix}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
+
+
+def copy_repo_evidence_images_to_run_dir(
+    *,
+    repo_root: Path,
+    source_paths: list[str],
+    evidence_dir: Path,
+    evidence_dir_relative: str,
+) -> list[str]:
+    if not source_paths:
+        return []
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    used_names = {item.name for item in evidence_dir.iterdir() if item.is_file()}
+    copied_relative_paths: list[str] = []
+    for relative_source in source_paths:
+        source = resolve_repo_relative_path(
+            relative_source,
+            repo_root=repo_root,
+            setting_name="ui_evidence.evidence_images",
+        )
+        if not source.is_file():
+            continue
+        name = to_evidence_filename(relative_source, used_names=used_names)
+        destination = evidence_dir / name
+        shutil.copy2(source, destination)
+        copied_relative_paths.append(
+            normalize_repo_path(str(Path(evidence_dir_relative) / name))
+        )
+    return copied_relative_paths
+
+
+def restore_paths_after_evidence_copy(
+    *,
+    repo_root: Path,
+    relative_paths: list[str],
+) -> list[str]:
+    removed: list[str] = []
+    for relative_path in sorted(
+        {
+            normalize_repo_path(str(item))
+            for item in relative_paths
+            if str(item).strip()
+        }
+    ):
+        git(
+            ["restore", "--staged", "--worktree", "--source=HEAD", "--", relative_path],
+            cwd=repo_root,
+            check=False,
+        )
+        tracked = (
+            git(
+                ["ls-files", "--error-unmatch", "--", relative_path],
+                cwd=repo_root,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if tracked:
+            removed.append(relative_path)
+            continue
+        resolved = resolve_repo_relative_path(
+            relative_path,
+            repo_root=repo_root,
+            setting_name="ui_evidence.evidence_images",
+        )
+        if resolved.is_file():
+            resolved.unlink()
+            removed.append(relative_path)
+            continue
+        if resolved.is_dir():
+            shutil.rmtree(resolved, ignore_errors=True)
+            removed.append(relative_path)
+    return removed
+
+
 def build_ui_evidence_state(
     *,
+    repo_root: Path,
+    run_dir: Path,
     changed_paths: list[str],
     config: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1115,6 +1466,22 @@ def build_ui_evidence_state(
         "/client/",
     ]
     default_image_extensions = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+    default_evidence_path_keywords = [
+        "/ui-evidence/",
+        "/screenshots/",
+        "/docs/images/ui",
+        "/docs/images/screenshot",
+        "/docs/images/capture",
+    ]
+    default_evidence_name_keywords = [
+        "screenshot",
+        "snapshot",
+        "capture",
+        "screen-",
+        "screen_",
+        "ui-",
+        "ui_",
+    ]
 
     ui_extensions = normalize_extensions(
         parse_string_list(
@@ -1140,6 +1507,23 @@ def build_ui_evidence_state(
         )
         or default_image_extensions
     )
+    evidence_path_keywords = [
+        normalize_repo_path(item).lower()
+        for item in parse_string_list(
+            ui_conf_raw.get("evidence_path_keywords"),
+            default=default_evidence_path_keywords,
+            name="ui_evidence.evidence_path_keywords",
+        )
+    ]
+    evidence_name_keywords = [
+        str(item).strip().lower()
+        for item in parse_string_list(
+            ui_conf_raw.get("evidence_name_keywords"),
+            default=default_evidence_name_keywords,
+            name="ui_evidence.evidence_name_keywords",
+        )
+        if str(item).strip()
+    ]
     max_ui_files = parse_positive_int(
         ui_conf_raw.get("max_ui_files"),
         default=8,
@@ -1150,13 +1534,32 @@ def build_ui_evidence_state(
         default=5,
         name="ui_evidence.max_images",
     )
+    delivery_mode = str(
+        ui_conf_raw.get("delivery_mode", "artifact-only")
+    ).strip().lower() or "artifact-only"
+    if delivery_mode not in {"artifact-only", "commit"}:
+        raise RuntimeError(
+            "Config 'ui_evidence.delivery_mode' must be one of: artifact-only, commit."
+        )
+    evidence_dir_relative, evidence_dir = resolve_run_dir_subpath(
+        run_dir=run_dir,
+        value=str(ui_conf_raw.get("artifact_dir") or "ui-evidence"),
+        setting_name="ui_evidence.artifact_dir",
+    )
 
     default_state = {
         "ui_evidence_enabled": enabled,
         "ui_evidence_required": required,
         "ui_evidence_status": "skipped",
+        "ui_evidence_delivery_mode": delivery_mode,
+        "ui_evidence_artifact_dir": evidence_dir_relative,
+        "ui_evidence_artifact_name": "",
+        "ui_evidence_artifact_url": "",
+        "ui_evidence_workflow_run_url": "",
         "ui_evidence_ui_files": [],
         "ui_evidence_image_files": [],
+        "ui_evidence_commit_image_files": [],
+        "ui_evidence_restored_paths": [],
         "ui_evidence_appendix": "",
     }
     if not enabled:
@@ -1197,10 +1600,28 @@ def build_ui_evidence_state(
             "ui_evidence_status": "not-required",
         }
 
-    if not image_files:
+    evidence_from_repo = collect_repo_evidence_images(
+        changed_image_paths=image_files,
+        evidence_path_keywords=evidence_path_keywords,
+        evidence_name_keywords=evidence_name_keywords,
+    )
+    copy_repo_evidence_images_to_run_dir(
+        repo_root=repo_root,
+        source_paths=evidence_from_repo,
+        evidence_dir=evidence_dir,
+        evidence_dir_relative=evidence_dir_relative,
+    )
+    collected_evidence_files = collect_run_dir_evidence_images(
+        evidence_dir=evidence_dir,
+        evidence_dir_relative=evidence_dir_relative,
+        image_extensions=image_extensions,
+    )
+    if not collected_evidence_files:
         message = (
-            "UI変更が検出されましたが、スクリーンショットまたはGIF画像がコミット対象に含まれていません。 "
-            "UI変更時は画像証跡を追加してください。"
+            "UI変更が検出されましたが、証跡画像が見つかりません。 "
+            f"証跡画像（{', '.join(image_extensions)}）を "
+            f"`{evidence_dir}` に配置するか、"
+            "evidence_path_keywords/evidence_name_keywords に一致する画像ファイルを追加してください。"
         )
         if required:
             raise RuntimeError(message)
@@ -1211,6 +1632,14 @@ def build_ui_evidence_state(
             "ui_evidence_ui_files": ui_files,
         }
 
+    restored_paths: list[str] = []
+    if delivery_mode == "artifact-only" and evidence_from_repo:
+        restored_paths = restore_paths_after_evidence_copy(
+            repo_root=repo_root,
+            relative_paths=evidence_from_repo,
+        )
+
+    artifact_meta = detect_workflow_artifact_metadata()
     ui_lines: list[str] = [
         "UI-Evidence:",
         "- UI Files:",
@@ -1220,18 +1649,30 @@ def build_ui_evidence_state(
     if len(ui_files) > max_ui_files:
         ui_lines.append(f"  - ... ({len(ui_files) - max_ui_files} files omitted)")
 
+    ui_lines.append(f"- Evidence Delivery: `{delivery_mode}`")
+    if artifact_meta["run_artifact_name"]:
+        ui_lines.append(f"- Workflow Artifact: `{artifact_meta['run_artifact_name']}`")
+    if artifact_meta["run_artifact_url"]:
+        ui_lines.append(f"- Workflow Artifact URL: {artifact_meta['run_artifact_url']}")
+    ui_lines.append(f"- Evidence Dir (artifact): `{evidence_dir_relative}`")
     ui_lines.append("- Screenshots or GIF:")
-    for path in image_files[:max_images]:
-        alt_text = Path(path).stem.replace("_", " ").replace("-", " ")
-        ui_lines.append(f"  - ![{alt_text}]({path})")
-    if len(image_files) > max_images:
-        ui_lines.append(f"  - ... ({len(image_files) - max_images} files omitted)")
+    for path in collected_evidence_files[:max_images]:
+        ui_lines.append(f"  - `{path}`")
+    if len(collected_evidence_files) > max_images:
+        ui_lines.append(
+            f"  - ... ({len(collected_evidence_files) - max_images} files omitted)"
+        )
 
     return {
         **default_state,
         "ui_evidence_status": "attached",
         "ui_evidence_ui_files": ui_files,
-        "ui_evidence_image_files": image_files,
+        "ui_evidence_image_files": collected_evidence_files,
+        "ui_evidence_commit_image_files": evidence_from_repo,
+        "ui_evidence_restored_paths": restored_paths,
+        "ui_evidence_artifact_name": artifact_meta["run_artifact_name"],
+        "ui_evidence_artifact_url": artifact_meta["run_artifact_url"],
+        "ui_evidence_workflow_run_url": artifact_meta["workflow_run_url"],
         "ui_evidence_appendix": "\n".join(ui_lines).strip(),
     }
 
@@ -1240,6 +1681,7 @@ def commit_changes(
     repo_root: Path,
     message: str,
     *,
+    run_dir: Path | None = None,
     config: dict[str, Any] | None = None,
     ignore_paths: list[str] | None = None,
     force_add_paths: list[str] | None = None,
@@ -1292,16 +1734,50 @@ def commit_changes(
         "ui_evidence_enabled": False,
         "ui_evidence_required": False,
         "ui_evidence_status": "skipped",
+        "ui_evidence_delivery_mode": "commit",
+        "ui_evidence_artifact_dir": "",
+        "ui_evidence_artifact_name": "",
+        "ui_evidence_artifact_url": "",
+        "ui_evidence_workflow_run_url": "",
         "ui_evidence_ui_files": [],
         "ui_evidence_image_files": [],
+        "ui_evidence_commit_image_files": [],
+        "ui_evidence_restored_paths": [],
         "ui_evidence_appendix": "",
     }
     final_message = message
     if config is not None:
+        if run_dir is None:
+            raise RuntimeError("Internal error: run_dir is required for UI evidence processing.")
         ui_evidence_state = build_ui_evidence_state(
+            repo_root=repo_root,
+            run_dir=run_dir,
             changed_paths=meaningful_changes,
             config=config,
         )
+
+        staged_names = git(["diff", "--cached", "--name-only"], cwd=repo_root)
+        staged_paths = [line.strip() for line in staged_names.stdout.splitlines() if line.strip()]
+        if not staged_paths:
+            raise RuntimeError("No file changes were created by the coder agent.")
+        meaningful_changes = [
+            path
+            for path in staged_paths
+            if normalize_repo_path(path) not in ignore_set
+        ]
+        if not meaningful_changes:
+            raise RuntimeError(
+                "No file changes were created by the coder agent. "
+                "Only trace artifact files were changed."
+            )
+        missing_required = sorted(path for path in required_set if path not in staged_paths)
+        if missing_required:
+            joined = ", ".join(missing_required)
+            raise RuntimeError(
+                "Required trace artifact files are not staged for commit: "
+                f"{joined}"
+            )
+
         ui_appendix = str(ui_evidence_state.get("ui_evidence_appendix", "")).strip()
         if ui_appendix:
             final_message = build_commit_message(final_message, ui_appendix)
@@ -2040,6 +2516,32 @@ def push_branch(repo_root: Path, branch_name: str) -> None:
     git(["push", "-u", "origin", branch_name], cwd=repo_root)
 
 
+def add_labels_to_pr(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    pr_ref: str,
+    labels: list[str],
+) -> None:
+    repo_args = ["--repo", repo_slug] if repo_slug else []
+    for label in labels:
+        normalized = str(label).strip()
+        if not normalized:
+            continue
+        proc = run_process(
+            ["gh", "pr", "edit", pr_ref, *repo_args, "--add-label", normalized],
+            cwd=repo_root,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            log(
+                "WARNING: PRラベル追加に失敗しました。"
+                f" pr={pr_ref} label={normalized}"
+                + (f" detail={detail}" if detail else "")
+            )
+
+
 def create_or_update_pr(
     *,
     repo_root: Path,
@@ -2053,23 +2555,29 @@ def create_or_update_pr(
 ) -> str:
     repo_args = ["--repo", repo_slug] if repo_slug else []
 
-    existing = run_process(
-        [
-            "gh",
-            "pr",
-            "list",
-            *repo_args,
-            "--head",
-            branch_name,
-            "--state",
-            "open",
-            "--json",
-            "number,url",
-        ],
-        cwd=repo_root,
-        check=True,
-    )
-    current = json.loads(existing.stdout or "[]")
+    def find_open_pr_by_head() -> list[dict[str, Any]]:
+        existing = run_process(
+            [
+                "gh",
+                "pr",
+                "list",
+                *repo_args,
+                "--head",
+                branch_name,
+                "--state",
+                "open",
+                "--json",
+                "number,url",
+            ],
+            cwd=repo_root,
+            check=True,
+        )
+        loaded = json.loads(existing.stdout or "[]")
+        if not isinstance(loaded, list):
+            return []
+        return [item for item in loaded if isinstance(item, dict)]
+
+    current = find_open_pr_by_head()
 
     if current:
         number = str(current[0]["number"])
@@ -2088,12 +2596,12 @@ def create_or_update_pr(
             cwd=repo_root,
             check=True,
         )
-        for label in labels:
-            run_process(
-                ["gh", "pr", "edit", number, *repo_args, "--add-label", label],
-                cwd=repo_root,
-                check=False,
-            )
+        add_labels_to_pr(
+            repo_root=repo_root,
+            repo_slug=repo_slug,
+            pr_ref=number,
+            labels=labels,
+        )
         pr_url = current[0]["url"]
         log(f"Updated existing PR: {pr_url}")
         return pr_url
@@ -2114,11 +2622,20 @@ def create_or_update_pr(
     ]
     if draft:
         cmd.append("--draft")
-    for label in labels:
-        cmd.extend(["--label", label])
 
     created = run_process(cmd, cwd=repo_root, check=True)
     pr_url = created.stdout.strip().splitlines()[-1]
+    current_after_create = find_open_pr_by_head()
+    pr_ref_for_label = pr_url
+    if current_after_create:
+        pr_ref_for_label = str(current_after_create[0]["number"])
+        pr_url = str(current_after_create[0].get("url", pr_url))
+    add_labels_to_pr(
+        repo_root=repo_root,
+        repo_slug=repo_slug,
+        pr_ref=pr_ref_for_label,
+        labels=labels,
+    )
     log(f"Created PR: {pr_url}")
     return pr_url
 
@@ -2313,6 +2830,14 @@ def main() -> int:
         if args.issue_file
         else load_issue_from_gh(args.issue_number, repo_slug=repo_slug, cwd=target_repo_root)
     )
+    issue_labels_raw = issue.get("labels", [])
+    if not isinstance(issue_labels_raw, list):
+        issue_labels_raw = []
+    issue_labels = [str(item).strip() for item in issue_labels_raw if str(item).strip()]
+    pr_title_default = build_default_pr_title(
+        issue_title=str(issue.get("title", "")),
+        issue_labels=issue_labels,
+    )
 
     config_base_branch = str(config.get("base_branch", "main"))
     base_branch = args.base_branch or runtime["default_base_branch"] or config_base_branch
@@ -2328,6 +2853,7 @@ def main() -> int:
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = control_root / ".agent" / "runs" / runtime["run_namespace"] / f"{timestamp}-issue-{issue['number']}"
     run_dir.mkdir(parents=True, exist_ok=False)
+    workflow_artifact_meta = detect_workflow_artifact_metadata()
 
     task_file = run_dir / "task.md"
     plan_file = run_dir / "plan.md"
@@ -2337,8 +2863,10 @@ def main() -> int:
     context: dict[str, Any] = {
         "issue_number": issue["number"],
         "issue_title": issue["title"],
+        "issue_labels": ", ".join(issue_labels),
         "issue_body": issue["body"],
         "issue_url": issue["url"],
+        "pr_title_default": pr_title_default,
         "run_timestamp": timestamp,
         "base_branch": base_branch,
         "branch_name": branch_name,
@@ -2390,11 +2918,20 @@ def main() -> int:
         "ui_evidence_enabled": True,
         "ui_evidence_required": True,
         "ui_evidence_status": "skipped",
+        "ui_evidence_delivery_mode": "artifact-only",
+        "ui_evidence_artifact_dir": "ui-evidence",
+        "ui_evidence_artifact_name": workflow_artifact_meta["run_artifact_name"],
+        "ui_evidence_artifact_url": workflow_artifact_meta["run_artifact_url"],
+        "ui_evidence_workflow_run_url": workflow_artifact_meta["workflow_run_url"],
         "ui_evidence_ui_files": [],
         "ui_evidence_image_files": [],
+        "ui_evidence_commit_image_files": [],
+        "ui_evidence_restored_paths": [],
+        "ui_evidence_dir": str((run_dir / "ui-evidence").resolve()),
         "ui_evidence_appendix": "",
         "head_commit": "",
     }
+    Path(context["ui_evidence_dir"]).mkdir(parents=True, exist_ok=True)
 
     context["instruction_markdown"] = render_issue_instruction_markdown(
         issue_number=issue["number"],
@@ -2607,6 +3144,7 @@ def main() -> int:
     commit_state = commit_changes(
         target_repo_root,
         commit_message,
+        run_dir=run_dir,
         config=config,
         ignore_paths=ignored_paths,
         force_add_paths=force_add_paths,
@@ -2686,12 +3224,21 @@ def main() -> int:
             raise RuntimeError("--create-pr requires --push.")
 
         pr_conf = config.get("pr", {})
+        pr_title_template = str(
+            pr_conf.get("title", "{pr_title_default}")
+        ).strip() or "{pr_title_default}"
         pr_title = format_template(
-            pr_conf.get("title", "[agent] {issue_title}"),
+            pr_title_template,
             context,
             "pr.title",
+        ).strip()
+        if not pr_title:
+            pr_title = str(context.get("pr_title_default", "")).strip() or str(issue["title"]).strip()
+        pr_labels = parse_string_list(
+            pr_conf.get("labels"),
+            default=[],
+            name="pr.labels",
         )
-        pr_labels = pr_conf.get("labels", [])
         pr_draft = bool(pr_conf.get("draft", True))
 
         validate_required_pr_context(context)
@@ -2731,6 +3278,9 @@ def main() -> int:
             f"- AI logs index: `{context['ai_logs_index_file']}`\n"
             f"- AI logs files: `{context['ai_logs_file_count']}`\n"
             f"- UI evidence status: `{context['ui_evidence_status']}`\n"
+            f"- UI evidence delivery mode: `{context['ui_evidence_delivery_mode']}`\n"
+            f"- UI evidence artifact dir: `{context['ui_evidence_artifact_dir']}`\n"
+            f"- UI evidence artifact: `{context['ui_evidence_artifact_name']}`\n"
             f"- UI evidence files: `{len(context.get('ui_evidence_image_files', []))}`\n"
             f"- Codex commit summary: `{context['codex_commit_summary_status']}`\n"
             f"- Validation:\n{context['validation_summary']}\n"

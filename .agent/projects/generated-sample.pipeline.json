@@ -9,6 +9,8 @@
     }
   },
   "pr": {
-    "labels": []
+    "labels": [
+      "agent/"
+    ]
   }
 }

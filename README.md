@@ -41,7 +41,7 @@ export GH_TOKEN='<your_github_token>'
 
 このフレームワークは、次の2層構成で Codex の検討を可視化します。
 
-- コミットメッセージ: `Problem / Decision / Validation / Risk` の短要約 + 末尾に `Codex-Log-Reference`
+- コミットメッセージ: `Codex-Context` 配下に `指示 / 試行錯誤 / 設計根拠` の固定3見出し + 末尾に `Codex-Log-Reference`
 - PR本文: `TL;DR / 要求の再解釈 / Decision Log / 試行ログ / 検証結果 / 残リスク / 証跡リンク`
 
 - Codex へ与えた内容（Issue本文、planner prompt）
@@ -59,22 +59,27 @@ export GH_TOKEN='<your_github_token>'
 ## UI変更時の画像証跡（コミットメッセージ必須）
 
 UI変更を含むコミットでは、変更箇所のスクリーンショットまたはアニメーションGIFを
-コミット対象に含めることを必須化しています。
+Workflow Artifact へ保存することを必須化しています（実装ブランチには含めません）。
 
 - UI変更が検出される条件: `ui_evidence.ui_extensions` または `ui_evidence.ui_path_keywords`
 - 画像証跡として認める条件: `ui_evidence.image_extensions`
+- 画像証跡の保存先（既定）: `run_dir/ui-evidence/`（artifact-only）
 - 必須条件を満たさない場合: コミット前にパイプラインを失敗させる
-- 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記する
+- 条件を満たす場合: コミットメッセージ末尾に `UI-Evidence` セクションを自動追記し、PR本文に artifact 参照情報を出力する
 
 `ui_evidence` 設定例（`.agent/pipeline.json`）:
 
 - `enabled`: UI証跡チェックの有効/無効
 - `required`: UI変更時に画像が無い場合に失敗させるか
+- `delivery_mode`: `artifact-only`（既定）または `commit`
+- `artifact_dir`: 実行ログ配下での証跡画像ディレクトリ
 - `ui_extensions`: UI変更として判定する拡張子
 - `ui_path_keywords`: UI変更として判定するパスキーワード
 - `image_extensions`: 証跡画像として許可する拡張子
+- `evidence_path_keywords`: リポジトリ内画像を証跡として扱うパスキーワード
+- `evidence_name_keywords`: リポジトリ内画像を証跡として扱うファイル名キーワード
 - `max_ui_files`: コミットメッセージに列挙するUI変更ファイルの最大件数
-- `max_images`: コミットメッセージに埋め込む画像の最大件数
+- `max_images`: コミットメッセージに列挙する証跡画像の最大件数
 
 ## Entire連携（任意）
 
@@ -104,6 +109,13 @@ PR本文には次の必須セクションを出力します。
 - `publish.branch`: `dedicated-branch` 利用時の集約先ブランチ名
 - `publish.required`: 集約先ブランチへの反映失敗時にジョブを失敗させるか
 - `publish.commit_message`: 集約ブランチ用コミットメッセージテンプレート
+
+## PRタイトルとラベル方針（OJPP準拠）
+
+- PRタイトルは `issue_title` から装飾プレフィックス（例: `[エージェント作業]`）を除去して自動整形します。
+- `feat:` / `fix:` など Conventional 形式が未指定の場合は、Issueタイトル/ラベルから推定した種別を付与します（既定は `feat:`）。
+- エージェントPRには `agent/` ラベルを付与します（付与失敗時は警告ログのみで続行）。
+- PR本文は OJPP の構成に合わせ、`変更内容 / 関連 Issue / 変更の種類 / チェックリスト / スクリーンショット / AIエージェント実行ログ` を出力します。
 
 ## 実行モード
 
@@ -167,6 +179,7 @@ python scripts/agent_pipeline.py \
 5. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
 6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
 7. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
+8. 実行後、`.agent/runs/...` を `agent-run-<run_id>-<run_attempt>` artifact として保存（UI証跡を含む）
 
 `CODEX_AUTH_JSON_B64` は検証用途の暫定手段です。安定運用は `OPENAI_API_KEY` の利用を推奨します。
 

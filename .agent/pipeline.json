@@ -24,7 +24,9 @@
       }
     },
     "pr": {
-      "labels": []
+      "labels": [
+        "agent/"
+      ]
     }
   },
   "entire": {
@@ -56,6 +58,8 @@
   "ui_evidence": {
     "enabled": true,
     "required": true,
+    "delivery_mode": "artifact-only",
+    "artifact_dir": "ui-evidence",
     "ui_extensions": [
       ".html",
       ".css",
@@ -83,6 +87,22 @@
       ".webp",
       ".gif"
     ],
+    "evidence_path_keywords": [
+      "/ui-evidence/",
+      "/screenshots/",
+      "/docs/images/ui",
+      "/docs/images/screenshot",
+      "/docs/images/capture"
+    ],
+    "evidence_name_keywords": [
+      "screenshot",
+      "snapshot",
+      "capture",
+      "screen-",
+      "screen_",
+      "ui-",
+      "ui_"
+    ],
     "max_ui_files": 8,
     "max_images": 5
   },
@@ -99,9 +119,9 @@
     }
   },
   "pr": {
-    "title": "[agent] {issue_title}",
+    "title": "{pr_title_default}",
     "labels": [
-      "agent"
+      "agent/"
     ],
     "draft": true
   }

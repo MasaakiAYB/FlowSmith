@@ -24,6 +24,7 @@ jobs:
       AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+      FLOWSMITH_RUN_ARTIFACT_NAME: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: チェックアウト
         uses: actions/checkout@v4
@@ -227,9 +228,9 @@ jobs:
 
           "${cmd[@]}"
 
-      - name: 失敗時ログ出力
-        id: debug_logs
-        if: ${{ failure() }}
+      - name: 実行ディレクトリ特定
+        id: run_dir
+        if: ${{ always() }}
         run: |
           set -euo pipefail
           runs_root=".agent/runs"
@@ -237,6 +238,15 @@ jobs:
           if [ -d "$runs_root" ]; then
             latest_run_dir="$(ls -1dt "$runs_root"/*/* 2>/dev/null | head -n 1 || true)"
           fi
+          echo "run_dir=$latest_run_dir" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${FLOWSMITH_RUN_ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: 失敗時ログ出力
+        id: debug_logs
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          latest_run_dir="${{ steps.run_dir.outputs.run_dir }}"
 
           if [ -z "$latest_run_dir" ]; then
             echo "run_dir=" >> "$GITHUB_OUTPUT"
@@ -262,11 +272,11 @@ jobs:
           fi
 
       - name: 実行ログartifact保存
-        if: ${{ always() && steps.debug_logs.outputs.run_dir != '' }}
+        if: ${{ always() && steps.run_dir.outputs.run_dir != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.debug_logs.outputs.run_dir }}
+          name: ${{ steps.run_dir.outputs.artifact_name }}
+          path: ${{ steps.run_dir.outputs.run_dir }}
           if-no-files-found: warn
           retention-days: 7
 

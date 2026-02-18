@@ -7,7 +7,7 @@
   ],
   "pr": {
     "labels": [
-      "agent",
+      "agent/",
       "sample-webapp"
     ]
   }
