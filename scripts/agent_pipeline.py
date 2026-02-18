@@ -156,6 +156,59 @@ def git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.Complet
     return run_process(["git", *args], cwd=cwd, check=check)
 
 
+def is_coder_output_filename(name: str) -> bool:
+    return bool(re.fullmatch(r"coder_output_attempt_[0-9]+\.md", name))
+
+
+def recover_coder_output_file(
+    *,
+    repo_root: Path,
+    output_file: Path,
+) -> None:
+    if not is_coder_output_filename(output_file.name):
+        return
+    root_fallback = repo_root / output_file.name
+    if not root_fallback.is_file():
+        return
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    if not output_file.exists():
+        shutil.move(str(root_fallback), str(output_file))
+        log(
+            "Recovered misplaced coder output file from repository root: "
+            f"{root_fallback} -> {output_file}"
+        )
+        return
+
+    # run_dir 側が既にある場合は repository root 側を削除して混入を防ぐ。
+    root_fallback.unlink(missing_ok=True)
+    log(
+        "Removed duplicate misplaced coder output file at repository root: "
+        f"{root_fallback}"
+    )
+
+
+def cleanup_untracked_coder_outputs(repo_root: Path) -> list[str]:
+    removed: list[str] = []
+    for file_path in sorted(repo_root.glob("coder_output_attempt_*.md")):
+        if not file_path.is_file() or not is_coder_output_filename(file_path.name):
+            continue
+        relative = normalize_repo_path(file_path.relative_to(repo_root).as_posix())
+        tracked = (
+            git(
+                ["ls-files", "--error-unmatch", "--", relative],
+                cwd=repo_root,
+                check=False,
+            ).returncode
+            == 0
+        )
+        if tracked:
+            continue
+        file_path.unlink(missing_ok=True)
+        removed.append(relative)
+    return removed
+
+
 def format_template(template: str, context: dict[str, Any], template_name: str) -> str:
     try:
         return template.format(**context)
@@ -1002,6 +1055,11 @@ def run_agent_command(
                 f"stderr_excerpt:\n{stderr_excerpt or '(empty)'}"
             )
         )
+
+    recover_coder_output_file(
+        repo_root=repo_root,
+        output_file=output_file,
+    )
 
     if not output_file.exists():
         stdout = proc.stdout.strip()
@@ -3172,6 +3230,13 @@ def main() -> int:
     )
     context.update(ai_logs_publish_state)
     context["log_location_markdown"] = render_log_location_markdown(context)
+
+    removed_stray_outputs = cleanup_untracked_coder_outputs(target_repo_root)
+    if removed_stray_outputs:
+        write_text(
+            run_dir / "coder_output_cleanup.md",
+            "\n".join(f"- removed: `{path}`" for path in removed_stray_outputs) + "\n",
+        )
 
     commit_message = format_template(
         config.get("commit_message", "feat(agent): resolve issue #{issue_number}"),
