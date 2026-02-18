@@ -2473,6 +2473,46 @@ def save_ai_logs_bundle(
                 normalize_repo_path(str(Path(dir_relative_path) / relative_tail))
             )
 
+        # commit前に run_dir/ui-evidence が未生成のケースに備え、repo側のUI証跡も ai-logs に取り込む。
+        ui_artifact_dir = resolve_ui_artifact_dir_from_config(config)
+        ui_artifact_prefix = (
+            normalize_repo_path(str(Path(dir_relative_path) / ui_artifact_dir)).rstrip("/") + "/"
+        ).lower()
+        has_ui_evidence_in_logs = any(
+            path.lower().startswith(ui_artifact_prefix) for path in copied_relative_paths
+        )
+        if not has_ui_evidence_in_logs:
+            ui_conf_raw = config.get("ui_evidence", {})
+            if ui_conf_raw is None:
+                ui_conf_raw = {}
+            if not isinstance(ui_conf_raw, dict):
+                raise RuntimeError("Config 'ui_evidence' must be an object when specified.")
+            _, ui_repo_evidence_dir = resolve_ui_repo_evidence_dir(
+                repo_root=repo_root,
+                ui_conf_raw=ui_conf_raw,
+            )
+            allowed_extensions = set(resolve_ui_image_extensions_from_config(config))
+            used_names: set[str] = set()
+            ui_logs_dir = logs_dir_path / ui_artifact_dir
+            for file_path in sorted(ui_logs_dir.glob("*")):
+                if file_path.is_file():
+                    used_names.add(file_path.name)
+
+            if ui_repo_evidence_dir.exists():
+                for source in sorted(ui_repo_evidence_dir.rglob("*")):
+                    if not source.is_file():
+                        continue
+                    if source.suffix.lower() not in allowed_extensions:
+                        continue
+                    relative_source = normalize_repo_path(source.relative_to(repo_root).as_posix())
+                    file_name = to_evidence_filename(relative_source, used_names=used_names)
+                    destination = ui_logs_dir / file_name
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                    copied_relative_paths.append(
+                        normalize_repo_path(str(Path(dir_relative_path) / ui_artifact_dir / file_name))
+                    )
+
         index_relative_path = normalize_repo_path(str(Path(dir_relative_path) / index_file_name))
         index_path = resolve_repo_relative_path(
             index_relative_path,
