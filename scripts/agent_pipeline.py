@@ -797,6 +797,20 @@ def render_issue_instruction_markdown(
     )
 
 
+def render_related_issue_markdown(
+    *,
+    issue_number: int,
+    issue_url: str,
+    issue_state: str,
+) -> str:
+    normalized_state = str(issue_state or "").strip().lower()
+    relation_line = f"- Closes #{issue_number}"
+    if normalized_state and normalized_state != "open":
+        relation_line = f"- Related to #{issue_number} (already {normalized_state})"
+    url_value = issue_url.strip() if issue_url and issue_url.strip() else "(local file)"
+    return f"{relation_line}\n- 元Issue URL: {url_value}"
+
+
 def render_validation_commands_markdown(commands: list[str]) -> str:
     if not commands:
         return "- `(quality_gates 未設定)`"
@@ -1074,6 +1088,7 @@ def load_issue_from_file(path: Path, issue_number: int) -> dict[str, Any]:
         "body": body,
         "url": "",
         "labels": [],
+        "state": "open",
     }
 
 
@@ -1084,7 +1099,7 @@ def load_issue_from_gh(issue_number: int, *, repo_slug: str, cwd: Path) -> dict[
         "view",
         str(issue_number),
         "--json",
-        "number,title,body,url,labels",
+        "number,title,body,url,labels,state",
     ]
     if repo_slug:
         cmd.extend(["--repo", repo_slug])
@@ -1107,6 +1122,7 @@ def load_issue_from_gh(issue_number: int, *, repo_slug: str, cwd: Path) -> dict[
         "body": payload.get("body") or "",
         "url": payload.get("url") or "",
         "labels": labels,
+        "state": str(payload.get("state") or "open").strip().lower(),
     }
 
 
@@ -2813,6 +2829,87 @@ def push_branch(repo_root: Path, branch_name: str) -> None:
     git(["push", "-u", "origin", branch_name], cwd=repo_root)
 
 
+def resolve_repo_label_names(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+) -> set[str]:
+    repo_args = ["--repo", repo_slug] if repo_slug else []
+    proc = run_process(
+        ["gh", "label", "list", *repo_args, "--limit", "200", "--json", "name"],
+        cwd=repo_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        log(
+            "WARNING: リポジトリラベル一覧の取得に失敗しました。"
+            + (f" detail={detail}" if detail else "")
+        )
+        return set()
+    try:
+        payload = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(payload, list):
+        return set()
+
+    names: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        label_name = str(item.get("name", "")).strip()
+        if label_name:
+            names.add(label_name)
+    return names
+
+
+def resolve_pr_labels_for_repo(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    labels: list[str],
+) -> list[str]:
+    requested: list[str] = []
+    seen_requested: set[str] = set()
+    for label in labels:
+        normalized = str(label).strip()
+        if not normalized or normalized in seen_requested:
+            continue
+        seen_requested.add(normalized)
+        requested.append(normalized)
+    if not requested:
+        return []
+
+    available = resolve_repo_label_names(repo_root=repo_root, repo_slug=repo_slug)
+    if not available:
+        return requested
+
+    fallback_map: dict[str, list[str]] = {
+        "agent/": ["agent-task", "agent"],
+    }
+    resolved: list[str] = []
+    for label in requested:
+        if label in available:
+            resolved.append(label)
+            continue
+
+        replacement = ""
+        for candidate in fallback_map.get(label, []):
+            if candidate in available:
+                replacement = candidate
+                break
+        if replacement:
+            if replacement not in resolved:
+                resolved.append(replacement)
+            log(f"INFO: PRラベルをフォールバックします: `{label}` -> `{replacement}`")
+            continue
+
+        log(f"WARNING: PRラベルが見つからないためスキップします: `{label}`")
+
+    return resolved
+
+
 def add_labels_to_pr(
     *,
     repo_root: Path,
@@ -2821,10 +2918,12 @@ def add_labels_to_pr(
     labels: list[str],
 ) -> None:
     repo_args = ["--repo", repo_slug] if repo_slug else []
-    for label in labels:
-        normalized = str(label).strip()
-        if not normalized:
-            continue
+    resolved_labels = resolve_pr_labels_for_repo(
+        repo_root=repo_root,
+        repo_slug=repo_slug,
+        labels=labels,
+    )
+    for normalized in resolved_labels:
         proc = run_process(
             ["gh", "pr", "edit", pr_ref, *repo_args, "--add-label", normalized],
             cwd=repo_root,
@@ -3131,6 +3230,7 @@ def main() -> int:
     if not isinstance(issue_labels_raw, list):
         issue_labels_raw = []
     issue_labels = [str(item).strip() for item in issue_labels_raw if str(item).strip()]
+    issue_state = str(issue.get("state") or "open").strip().lower() or "open"
     pr_title_default = build_default_pr_title(
         issue_title=str(issue.get("title", "")),
         issue_labels=issue_labels,
@@ -3170,8 +3270,10 @@ def main() -> int:
         "issue_number": issue["number"],
         "issue_title": issue["title"],
         "issue_labels": ", ".join(issue_labels),
+        "issue_state": issue_state,
         "issue_body": issue["body"],
         "issue_url": issue["url"],
+        "related_issue_markdown": "",
         "pr_title_default": pr_title_default,
         "run_timestamp": timestamp,
         "base_branch": base_branch,
@@ -3252,6 +3354,11 @@ def main() -> int:
         issue_title=issue["title"],
         issue_url=issue["url"],
         issue_body=issue["body"],
+    )
+    context["related_issue_markdown"] = render_related_issue_markdown(
+        issue_number=issue["number"],
+        issue_url=issue["url"],
+        issue_state=issue_state,
     )
     context["validation_commands_markdown"] = render_validation_commands_markdown(quality_gates)
     context["log_location_markdown"] = render_log_location_markdown(context)

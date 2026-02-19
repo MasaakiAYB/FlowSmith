@@ -9,8 +9,7 @@
 
 ## 関連 Issue
 
-- Closes #{issue_number}
-- 元Issue URL: {issue_url}
+{related_issue_markdown}
 
 ## 変更の種類
 
