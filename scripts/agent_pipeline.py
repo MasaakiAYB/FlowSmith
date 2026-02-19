@@ -2827,7 +2827,28 @@ def publish_ai_logs_to_dedicated_branch(
 
 
 def push_branch(repo_root: Path, branch_name: str) -> None:
-    git(["push", "-u", "origin", branch_name], cwd=repo_root)
+    push_proc = git(
+        ["push", "-u", "origin", branch_name],
+        cwd=repo_root,
+        check=False,
+    )
+    if push_proc.returncode == 0:
+        return
+
+    push_stderr = push_proc.stderr or ""
+    if "non-fast-forward" in push_stderr:
+        log(
+            "INFO: Push rejected by non-fast-forward. "
+            f"Rebasing `{branch_name}` onto `origin/{branch_name}` and retrying."
+        )
+        git(["pull", "--rebase", "origin", branch_name], cwd=repo_root, check=True)
+        git(["push", "-u", "origin", branch_name], cwd=repo_root, check=True)
+        return
+
+    raise RuntimeError(
+        "コード変更ブランチの push に失敗しました。\n"
+        f"stderr:\n{push_stderr}"
+    )
 
 
 def normalize_label_list(labels: list[str]) -> list[str]:
