@@ -6,16 +6,18 @@
 2. Issue番号と project id を指定して `自律エージェント PR` ワークフローを起動する
 3. `scripts/agent_pipeline.py` が `.agent/projects.json` から対象リポジトリを解決する
 4. 対象リポジトリを準備（clone/fetch）し、`gh issue view --repo` で Issue 情報を取得する
-5. Planner コマンドが実装計画を作成する
-6. Coder コマンドがコード変更を行い、各試行後に品質ゲートを実行する
-7. 失敗したゲート結果を次回試行のフィードバックとして渡す
-8. Codex への入力（Issue本文 / planner prompt）と検討結果（plan/review/coder出力/品質ゲート）を抽出し、コミットメッセージ要約を生成する
-9. `run_dir` の実行ログを `ai-logs/issue-<番号>-<timestamp>/` に保存し、専用ブランチ（既定: `agent-ai-logs`）へ集約する
-10. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
-11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
-12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
-13. 人間レビューでマージ可否を判断する
-14. PRフィードバック起点では `feedback_pr_number` のレビュー/コメントを抽出し、次回の Planner/Coder/Reviewer 入力へ反映する（差分ゼロ時は成功扱いで終了可能）
+5. `acquire-lock` が `agent/running` ラベルをロックとして付与し、Issue単位排他・リポジトリ並列上限・操作クールダウンを判定する
+6. Planner コマンドが実装計画を作成する
+7. Coder コマンドがコード変更を行い、各試行後に品質ゲートを実行する
+8. 失敗したゲート結果を次回試行のフィードバックとして渡す
+9. Codex への入力（Issue本文 / planner prompt）と検討結果（plan/review/coder出力/品質ゲート）を抽出し、コミットメッセージ要約を生成する
+10. `run_dir` の実行ログを `ai-logs/issue-<番号>-<timestamp>/` に保存し、専用ブランチ（既定: `agent-ai-logs`）へ集約する
+11. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
+12. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
+13. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
+14. `release-lock` が `agent/running` を解放し、操作ラベル付き Issue ではクールダウン記録を残す
+15. 人間レビューでマージ可否を判断する
+16. PRフィードバック起点では `feedback_pr_number` のレビュー/コメントを抽出し、次回の Planner/Coder/Reviewer 入力へ反映する（差分ゼロ時は成功扱いで終了可能）
 
 ## 外部呼び出し受け口（ディスパッチ）
 
@@ -24,6 +26,13 @@
 - Issue入口: `.github/workflows/autonomous-agent-dispatch.yml`
 - Feedback入口: `.github/workflows/autonomous-agent-feedback-dispatch.yml`
 - 共通実行: `.github/workflows/autonomous-agent-runner.yml`（`workflow_call`）
+
+共通実行は `acquire-lock -> run-agent -> release-lock` の3ジョブ構成です。
+
+- `agent/running` ラベルを開始時に付与し、終了時に解除
+- 同一Issueは `concurrency` とラベルロックで同時実行を防止
+- 同一リポジトリの同時実行上限は `FLOWSMITH_MAX_PARALLEL_PER_REPO`（既定2）
+- `agent/service:*` + `agent/op:*` が付いた Issue では `FLOWSMITH_OPERATION_COOLDOWN_MINUTES`（既定30分）で連打を抑止
 
 共通バリデーション:
 1. `client_payload.issue_number` は整数であること

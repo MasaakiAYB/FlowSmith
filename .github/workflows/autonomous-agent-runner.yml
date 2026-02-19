@@ -65,14 +65,98 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: read
+  issues: write
 
 concurrency:
-  group: dispatch-${{ inputs.dispatch_mode }}-${{ inputs.project_id || inputs.target_repo || 'unknown' }}-${{ inputs.issue_number || github.run_id }}
+  group: dispatch-${{ inputs.target_repo || inputs.project_id || 'unknown' }}-issue-${{ inputs.issue_number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
+  acquire-lock:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: repo-lock-acquire-${{ inputs.target_repo || inputs.project_id || 'unknown' }}
+      cancel-in-progress: false
+    outputs:
+      target_repo: ${{ steps.repo.outputs.target_repo }}
+      lock_acquired: ${{ steps.acquire.outputs.lock_acquired }}
+      lock_label: ${{ steps.acquire.outputs.lock_label }}
+      service_label: ${{ steps.acquire.outputs.service_label }}
+      operation_label: ${{ steps.acquire.outputs.operation_label }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GitHub トークン解決
+        run: |
+          if [ -n "${{ secrets.CROSS_REPO_GH_TOKEN }}" ]; then
+            echo "GH_TOKEN=${{ secrets.CROSS_REPO_GH_TOKEN }}" >> "$GITHUB_ENV"
+          else
+            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 対象リポジトリ解決
+        id: repo
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+        run: |
+          set -euo pipefail
+          target_repo="${{ inputs.target_repo }}"
+
+          if [ -z "$target_repo" ] && [ -n "${PROJECT_ID:-}" ]; then
+            target_repo="$(python - <<'PY'
+import json
+import os
+from pathlib import Path
+project_id = os.getenv("PROJECT_ID", "").strip()
+if not project_id:
+    print("")
+    raise SystemExit(0)
+payload = json.loads(Path('.agent/projects.json').read_text(encoding='utf-8'))
+project = payload.get('projects', {}).get(project_id, {})
+if isinstance(project, dict):
+    print(str(project.get('repo', '')).strip())
+else:
+    print("")
+PY
+)"
+          fi
+
+          if [ -z "$target_repo" ]; then
+            echo "target_repo を解決できませんでした。inputs.target_repo か inputs.project_id を確認してください。" >&2
+            exit 1
+          fi
+
+          echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
+
+      - name: ロック取得（queue + exclusive）
+        id: acquire
+        env:
+          TARGET_REPO: ${{ steps.repo.outputs.target_repo }}
+        run: |
+          set -euo pipefail
+          python scripts/agent_lock.py acquire \
+            --repo "$TARGET_REPO" \
+            --issue-number "${{ inputs.issue_number }}" \
+            --lock-label "${{ vars.FLOWSMITH_LOCK_LABEL || 'agent/running' }}" \
+            --max-parallel "${{ vars.FLOWSMITH_MAX_PARALLEL_PER_REPO || '2' }}" \
+            --poll-seconds "${{ vars.FLOWSMITH_LOCK_POLL_SECONDS || '20' }}" \
+            --timeout-minutes "${{ vars.FLOWSMITH_LOCK_TIMEOUT_MINUTES || '180' }}" \
+            --stale-minutes "${{ vars.FLOWSMITH_LOCK_STALE_MINUTES || '360' }}" \
+            --cooldown-minutes "${{ vars.FLOWSMITH_OPERATION_COOLDOWN_MINUTES || '30' }}" \
+            --service-label-prefix "${{ vars.FLOWSMITH_SERVICE_LABEL_PREFIX || 'agent/service:' }}" \
+            --operation-label-prefix "${{ vars.FLOWSMITH_OPERATION_LABEL_PREFIX || 'agent/op:' }}"
+
   run-agent:
+    needs: acquire-lock
+    if: ${{ needs.acquire-lock.outputs.lock_acquired == 'true' }}
     runs-on: ubuntu-latest
     env:
       AGENT_PLANNER_CMD: ${{ secrets.AGENT_PLANNER_CMD }}
@@ -81,6 +165,7 @@ jobs:
       AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+      TARGET_REPO_RESOLVED: ${{ needs.acquire-lock.outputs.target_repo }}
       FLOWSMITH_RUN_ARTIFACT_NAME: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: チェックアウト
@@ -234,8 +319,8 @@ jobs:
             cmd+=(--project "${{ inputs.project_id }}")
           fi
 
-          if [ -n "${{ inputs.target_repo }}" ]; then
-            cmd+=(--target-repo "${{ inputs.target_repo }}")
+          if [ -n "${TARGET_REPO_RESOLVED:-}" ]; then
+            cmd+=(--target-repo "$TARGET_REPO_RESOLVED")
           fi
 
           if [ -n "${{ inputs.base_branch }}" ]; then
@@ -327,10 +412,57 @@ jobs:
             echo "- mode: \`${{ inputs.dispatch_mode }}\`"
             echo "- issue_number: \`${{ inputs.issue_number }}\`"
             echo "- project_id: \`${{ inputs.project_id || '未指定' }}\`"
-            echo "- target_repo: \`${{ inputs.target_repo || '未指定' }}\`"
+            echo "- target_repo: \`${TARGET_REPO_RESOLVED:-未指定}\`"
             echo "- branch_name: \`${{ inputs.branch_name || '未指定' }}\`"
             echo "- feedback_pr_number: \`${{ inputs.feedback_pr_number || '未指定' }}\`"
             echo "- allow_no_changes: \`${{ inputs.allow_no_changes }}\`"
             echo "- source_repository: \`${{ inputs.source_repository || '未指定' }}\`"
             echo "- request_id: \`${{ inputs.request_id || '未指定' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release-lock:
+    needs:
+      - acquire-lock
+      - run-agent
+    if: ${{ always() && needs.acquire-lock.outputs.lock_acquired == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: repo-lock-acquire-${{ inputs.target_repo || inputs.project_id || 'unknown' }}
+      cancel-in-progress: false
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GitHub トークン解決
+        run: |
+          if [ -n "${{ secrets.CROSS_REPO_GH_TOKEN }}" ]; then
+            echo "GH_TOKEN=${{ secrets.CROSS_REPO_GH_TOKEN }}" >> "$GITHUB_ENV"
+          else
+            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: ロック解放
+        env:
+          TARGET_REPO: ${{ needs.acquire-lock.outputs.target_repo }}
+          LOCK_LABEL: ${{ needs.acquire-lock.outputs.lock_label }}
+          SERVICE_LABEL: ${{ needs.acquire-lock.outputs.service_label }}
+          OPERATION_LABEL: ${{ needs.acquire-lock.outputs.operation_label }}
+        run: |
+          set -euo pipefail
+          record_flag=""
+          if [ -n "${SERVICE_LABEL:-}" ] && [ -n "${OPERATION_LABEL:-}" ]; then
+            record_flag="--record-operation"
+          fi
+
+          python scripts/agent_lock.py release \
+            --repo "$TARGET_REPO" \
+            --issue-number "${{ inputs.issue_number }}" \
+            --lock-label "${LOCK_LABEL:-agent/running}" \
+            --service-label "${SERVICE_LABEL:-}" \
+            --operation-label "${OPERATION_LABEL:-}" \
+            $record_flag

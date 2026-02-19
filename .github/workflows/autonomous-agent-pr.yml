@@ -22,6 +22,11 @@ on:
         required: false
         default: ""
         type: string
+      branch_name:
+        description: "任意: 作業ブランチの上書き"
+        required: false
+        default: ""
+        type: string
       feedback_pr_number:
         description: "任意: 改善指摘を抽出する対象PR番号（対象repo側）"
         required: false
@@ -32,213 +37,31 @@ on:
         required: false
         default: ""
         type: string
+      no_sync:
+        description: "任意: 同期をスキップ"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
   pull-requests: write
-  issues: read
+  issues: write
 
 jobs:
   run-agent:
-    runs-on: ubuntu-latest
-    env:
-      AGENT_PLANNER_CMD: ${{ secrets.AGENT_PLANNER_CMD }}
-      AGENT_CODER_CMD: ${{ secrets.AGENT_CODER_CMD }}
-      AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
-      AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
-      FLOWSMITH_RUN_ARTIFACT_NAME: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - name: チェックアウト
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Python セットアップ
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Node.js セットアップ（エージェントCLI用）
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: 日本語フォントセットアップ（UI証跡用）
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            fonts-noto-cjk \
-            fonts-ipafont-gothic \
-            fonts-ipafont-mincho
-          fc-cache -f
-
-      - name: Codex CLI インストール（標準）
-        run: |
-          if command -v codex >/dev/null 2>&1; then
-            codex --version
-            exit 0
-          fi
-          npm install -g @openai/codex
-          codex --version
-
-      - name: Codex 認証設定
-        run: |
-          set -euo pipefail
-          if [ -n "${CODEX_AUTH_JSON_B64:-}" ]; then
-            mkdir -p "$HOME/.codex"
-            printf '%s' "$CODEX_AUTH_JSON_B64" | base64 --decode > "$HOME/.codex/auth.json"
-            chmod 600 "$HOME/.codex/auth.json"
-            echo "Codex 認証: CODEX_AUTH_JSON_B64 を使用"
-          elif [ -n "${OPENAI_API_KEY:-}" ]; then
-            printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
-            echo "Codex 認証: OPENAI_API_KEY を使用"
-          else
-            echo "OPENAI_API_KEY または CODEX_AUTH_JSON_B64 のいずれかを設定してください。" >&2
-            exit 1
-          fi
-          codex login status
-
-      - name: エージェントセットアップスクリプト実行（任意）
-        if: ${{ env.AGENT_SETUP_SCRIPT != '' }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$AGENT_SETUP_SCRIPT" > /tmp/agent_setup.sh
-          chmod +x /tmp/agent_setup.sh
-          /tmp/agent_setup.sh
-
-      - name: エージェントコマンド事前検証
-        run: |
-          python - <<'PY'
-          import os
-          import shlex
-          import shutil
-          import sys
-
-          specs = [
-              ("AGENT_PLANNER_CMD", True),
-              ("AGENT_CODER_CMD", True),
-              ("AGENT_REVIEWER_CMD", False),
-          ]
-          errors = []
-
-          for key, required in specs:
-              value = os.getenv(key, "").strip()
-              if not value:
-                  if required:
-                      errors.append(f"{key} が未設定です。")
-                  continue
-              try:
-                  parts = shlex.split(value)
-              except ValueError as err:
-                  errors.append(f"{key} のパースに失敗しました: {err}")
-                  continue
-              if not parts:
-                  errors.append(f"{key} が空コマンドです。")
-                  continue
-              command = parts[0]
-              if shutil.which(command) is None:
-                  errors.append(
-                      f"{key} の実行コマンド '{command}' が見つかりません。"
-                  )
-
-          if errors:
-              print("[agent-preflight] コマンド検証に失敗しました。", file=sys.stderr)
-              for item in errors:
-                  print(f"- {item}", file=sys.stderr)
-              raise SystemExit(1)
-          PY
-
-      - name: Entire CLI インストール（任意）
-        if: ${{ vars.FLOWSMITH_ENABLE_ENTIRE == 'true' }}
-        run: |
-          curl -fsSL https://entire.io/install.sh | bash
-          if command -v entire >/dev/null 2>&1; then
-            entire version
-            exit 0
-          fi
-          if [ -x "$HOME/.entire/bin/entire" ]; then
-            echo "$HOME/.entire/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.entire/bin:$PATH"
-          elif [ -x "$HOME/.local/bin/entire" ]; then
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.local/bin:$PATH"
-          fi
-          entire version
-
-      - name: Git 実行ユーザー設定
-        run: |
-          git config --global user.name "flowsmith-agent[bot]"
-          git config --global user.email "flowsmith-agent[bot]@users.noreply.github.com"
-
-      - name: GitHub トークン解決
-        run: |
-          if [ -n "${{ secrets.CROSS_REPO_GH_TOKEN }}" ]; then
-            echo "GH_TOKEN=${{ secrets.CROSS_REPO_GH_TOKEN }}" >> "$GITHUB_ENV"
-          else
-            echo "GH_TOKEN=${{ github.token }}" >> "$GITHUB_ENV"
-          fi
-
-      - name: Git 認証セットアップ
-        run: |
-          gh auth status
-          gh auth setup-git
-
-      - name: 自律パイプライン実行
-        env:
-          FEEDBACK_TEXT: ${{ inputs.feedback_text }}
-        run: |
-          cmd=(
-            python scripts/agent_pipeline.py
-            --issue-number "${{ inputs.issue_number }}"
-            --push
-            --create-pr
-          )
-
-          if [ -n "${{ inputs.project_id }}" ]; then
-            cmd+=(--project "${{ inputs.project_id }}")
-          fi
-
-          if [ -n "${{ inputs.target_repo }}" ]; then
-            cmd+=(--target-repo "${{ inputs.target_repo }}")
-          fi
-
-          if [ -n "${{ inputs.base_branch }}" ]; then
-            cmd+=(--base-branch "${{ inputs.base_branch }}")
-          fi
-
-          if [ -n "${{ inputs.feedback_pr_number }}" ]; then
-            cmd+=(--feedback-pr-number "${{ inputs.feedback_pr_number }}")
-          fi
-
-          if [ -n "${FEEDBACK_TEXT:-}" ]; then
-            feedback_file="$RUNNER_TEMP/flowsmith-feedback-text.md"
-            printf '%s\n' "$FEEDBACK_TEXT" > "$feedback_file"
-            cmd+=(--feedback-file "$feedback_file")
-          fi
-
-          "${cmd[@]}"
-
-      - name: 実行ディレクトリ特定
-        id: run_dir
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          runs_root=".agent/runs"
-          latest_run_dir=""
-          if [ -d "$runs_root" ]; then
-            latest_run_dir="$(ls -1dt "$runs_root"/*/* 2>/dev/null | head -n 1 || true)"
-          fi
-          echo "run_dir=$latest_run_dir" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=${FLOWSMITH_RUN_ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: 実行ログartifact保存
-        if: ${{ always() && steps.run_dir.outputs.run_dir != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.run_dir.outputs.artifact_name }}
-          path: ${{ steps.run_dir.outputs.run_dir }}
-          if-no-files-found: warn
-          retention-days: 7
+    uses: ./.github/workflows/autonomous-agent-runner.yml
+    with:
+      dispatch_mode: ${{ inputs.feedback_pr_number != '' && 'feedback' || 'issue' }}
+      issue_number: ${{ inputs.issue_number }}
+      project_id: ${{ inputs.project_id }}
+      target_repo: ${{ inputs.target_repo }}
+      base_branch: ${{ inputs.base_branch }}
+      branch_name: ${{ inputs.branch_name }}
+      feedback_pr_number: ${{ inputs.feedback_pr_number }}
+      feedback_text: ${{ inputs.feedback_text }}
+      no_sync: ${{ inputs.no_sync }}
+      allow_no_changes: ${{ inputs.feedback_pr_number != '' }}
+      source_repository: ${{ github.repository }}
+      request_id: ${{ format('manual-{0}-{1}', github.run_id, github.run_attempt) }}
+    secrets: inherit

@@ -204,10 +204,43 @@ FlowSmithを呼び出す側（業務アプリ側）には、次を設定しま�
 - Variable `FLOW_SMITH_REPO`: `owner/FlowSmith` 形式（例: `MasaakiAYB/FlowSmith`）
 - Variable `FLOW_SMITH_PROJECT_ID`: FlowSmith の `.agent/projects.json` を使うときのみ指定
 
+FlowSmith側（このリポジトリ）でのロック制御用 Variables:
+
+- `FLOWSMITH_LOCK_LABEL`（既定: `agent/running`）
+- `FLOWSMITH_MAX_PARALLEL_PER_REPO`（既定: `2`）
+- `FLOWSMITH_LOCK_POLL_SECONDS`（既定: `20`）
+- `FLOWSMITH_LOCK_TIMEOUT_MINUTES`（既定: `180`）
+- `FLOWSMITH_LOCK_STALE_MINUTES`（既定: `360`）
+- `FLOWSMITH_SERVICE_LABEL_PREFIX`（既定: `agent/service:`）
+- `FLOWSMITH_OPERATION_LABEL_PREFIX`（既定: `agent/op:`）
+- `FLOWSMITH_OPERATION_COOLDOWN_MINUTES`（既定: `30`）
+
 トリガーワークフローの最小 `permissions`:
 
 - Issue起点: `contents: read`
 - PRフィードバック起点: `contents: read`, `pull-requests: read`, `issues: read`
+
+### キュー＋排他（ラベルロック）
+
+`autonomous-agent-runner.yml` では `scripts/agent_lock.py` を使って、次を制御します。
+
+1. 同一Issueの同時実行禁止: `concurrency`（Issue単位） + `agent/running` ラベル
+2. 同一リポジトリの同時実行上限: `FLOWSMITH_MAX_PARALLEL_PER_REPO`（既定2）
+3. 同一サービス操作の連打防止: `agent/service:*` + `agent/op:*` ラベルでクールダウン判定
+
+ロックの流れ:
+
+1. `acquire-lock` ジョブが対象Issueへ `agent/running` を付与
+2. `run-agent` ジョブで実装・PR更新を実行
+3. `release-lock` ジョブ（`always`）で `agent/running` を除去
+
+操作クールダウンを使う場合は、対象Issueに次のラベルを付けます。
+
+- `agent/service:<service-name>` 例: `agent/service:api`
+- `agent/op:<operation-name>` 例: `agent/op:restart`
+
+`release-lock` で操作記録コメントを残し、次回 `acquire-lock` 時に
+`FLOWSMITH_OPERATION_COOLDOWN_MINUTES`（既定30分）以内なら待機します。
 
 ### 呼び出し側Actions実装例 1: Issue作成で自動起動
 
