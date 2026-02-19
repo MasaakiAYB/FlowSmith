@@ -5,26 +5,23 @@
 - プロジェクト: `{project_id}`
 - コミット: `{head_commit}`
 
+## レビュー要約
+
+### 変更の種類（自動判定）
+{pr_change_type_checklist_markdown}
+
+### チェックリスト（自動）
+{pr_auto_checklist_markdown}
+
+### チェックリスト（手動）
+{pr_manual_checklist_markdown}
+
+## 実装計画
 {plan_markdown}
 
 ## 関連 Issue
 
 {related_issue_markdown}
-
-## 変更の種類
-
-- [ ] バグ修正
-- [ ] 新機能
-- [ ] ドキュメント更新
-- [ ] リファクタリング
-- [ ] CI/CD・インフラ
-- [ ] テスト追加・修正
-
-## チェックリスト
-
-- [ ] 検証コマンドの結果を確認した
-- [ ] 既存挙動への影響を確認した
-- [ ] 人間レビューを実施した
 
 ## スクリーンショット（UI変更時）
 

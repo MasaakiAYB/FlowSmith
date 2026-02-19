@@ -344,6 +344,117 @@ def build_default_pr_title(*, issue_title: str, issue_labels: list[str]) -> str:
     return f"{pr_type}: {normalized}"
 
 
+def extract_conventional_pr_type(title: str) -> str:
+    pattern = (
+        r"^(?P<type>"
+        + "|".join(CONVENTIONAL_PR_TYPES)
+        + r")(?:\([^)]+\))?:\s+\S"
+    )
+    match = re.match(pattern, title, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return str(match.group("type")).lower()
+
+
+def build_pr_change_type_checklist_markdown(
+    *,
+    issue_title: str,
+    issue_labels: list[str],
+    pr_title: str,
+    committed_paths: list[str],
+) -> str:
+    primary_type = extract_conventional_pr_type(pr_title) or infer_pr_type_from_issue(
+        issue_title=issue_title,
+        issue_labels=issue_labels,
+    )
+
+    lowered_paths = [normalize_repo_path(path).lower() for path in committed_paths]
+    docs_changed = any(path == "readme.md" or path.startswith("docs/") for path in lowered_paths)
+    ci_changed = any(path.startswith(".github/") for path in lowered_paths)
+    test_changed = any(
+        (
+            "/tests/" in f"/{path}"
+            or "/test/" in f"/{path}"
+            or re.search(r"(?:^|/).*(?:_test\.|\.spec\.|\.test\.)", path)
+        )
+        for path in lowered_paths
+    )
+
+    bug_fix = primary_type == "fix"
+    feature = primary_type == "feat"
+    docs = primary_type == "docs" or docs_changed
+    refactor = primary_type in {"refactor", "perf", "revert"}
+    ci_infra = primary_type in {"ci", "build", "chore"} or ci_changed
+    tests = primary_type == "test" or test_changed
+
+    def mark(value: bool) -> str:
+        return "x" if value else " "
+
+    return "\n".join(
+        [
+            f"- [{mark(bug_fix)}] バグ修正",
+            f"- [{mark(feature)}] 新機能",
+            f"- [{mark(docs)}] ドキュメント更新",
+            f"- [{mark(refactor)}] リファクタリング",
+            f"- [{mark(ci_infra)}] CI/CD・インフラ",
+            f"- [{mark(tests)}] テスト追加・修正",
+            f"- 判定種別: `{primary_type}`",
+        ]
+    )
+
+
+def is_validation_summary_passed(summary: str) -> bool:
+    normalized = str(summary or "").strip()
+    if not normalized:
+        return False
+    upper = normalized.upper()
+    if "FAIL" in upper:
+        return False
+    return "PASS" in upper or "NO QUALITY GATES" in upper
+
+
+def build_pr_auto_checklist_markdown(context: dict[str, Any]) -> str:
+    quality_passed = is_validation_summary_passed(str(context.get("validation_summary", "")))
+    ui_status = str(context.get("ui_evidence_status", "unknown")).strip() or "unknown"
+    ui_count = len(context.get("ui_evidence_image_files", []))
+    ai_logs_status = str(context.get("ai_logs_status", "unknown")).strip() or "unknown"
+    ai_logs_url = str(context.get("ai_logs_index_url", "")).strip()
+
+    if ui_status == "attached":
+        ui_checked = True
+        ui_note = f"UI証跡あり（{ui_count}件）"
+    elif ui_status in {"not-required", "skipped"}:
+        ui_checked = True
+        ui_note = "UI変更なし / 証跡不要"
+    else:
+        ui_checked = False
+        ui_note = f"UI証跡状態: {ui_status}"
+
+    ai_logs_checked = ai_logs_status == "saved" and bool(ai_logs_url)
+    ai_logs_note = ai_logs_url or "AIログリンク未確定"
+
+    def mark(value: bool) -> str:
+        return "x" if value else " "
+
+    return "\n".join(
+        [
+            f"- [{mark(quality_passed)}] 品質ゲート結果を確認済み",
+            f"- [{mark(ui_checked)}] UI証跡状態を確認済み（{ui_note}）",
+            f"- [{mark(ai_logs_checked)}] AIログリンクを確認可能（{ai_logs_note}）",
+        ]
+    )
+
+
+def build_pr_manual_checklist_markdown() -> str:
+    return "\n".join(
+        [
+            "- [ ] 受け入れ条件と実装差分が一致していることを確認した",
+            "- [ ] 破壊的変更・移行手順の有無を確認した",
+            "- [ ] 人間レビューを実施した",
+        ]
+    )
+
+
 def strip_markdown_prefix(line: str) -> str:
     text = line.strip()
     if not text:
@@ -2079,6 +2190,7 @@ def commit_changes(
     return {
         **ui_evidence_state,
         "commit_message_final": final_message,
+        "committed_paths": sorted(set(meaningful_changes)),
     }
 
 
@@ -3537,6 +3649,25 @@ def main() -> int:
         "instruction_markdown": "",
         "validation_commands_markdown": "",
         "log_location_markdown": "",
+        "pr_change_type_checklist_markdown": (
+            "- [ ] バグ修正\n"
+            "- [ ] 新機能\n"
+            "- [ ] ドキュメント更新\n"
+            "- [ ] リファクタリング\n"
+            "- [ ] CI/CD・インフラ\n"
+            "- [ ] テスト追加・修正\n"
+            "- 判定種別: `feat`"
+        ),
+        "pr_auto_checklist_markdown": (
+            "- [ ] 品質ゲート結果を確認済み\n"
+            "- [ ] UI証跡状態を確認済み\n"
+            "- [ ] AIログリンクを確認可能"
+        ),
+        "pr_manual_checklist_markdown": (
+            "- [ ] 受け入れ条件と実装差分が一致していることを確認した\n"
+            "- [ ] 破壊的変更・移行手順の有無を確認した\n"
+            "- [ ] 人間レビューを実施した"
+        ),
         "codex_commit_summary_markdown": "_Codex判断ログは未生成です。_",
         "plan_markdown": "",
         "validation_summary": "",
@@ -3587,6 +3718,7 @@ def main() -> int:
         "ui_evidence_repo_dir": ui_repo_evidence_relative,
         "ui_evidence_dir": str(ui_repo_evidence_dir.resolve()),
         "ui_evidence_appendix": "",
+        "committed_paths": [],
         "head_commit": "",
     }
     ui_repo_evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -3920,6 +4052,21 @@ def main() -> int:
         )
         pr_labels_required = bool(pr_conf.get("labels_required", True))
         pr_draft = bool(pr_conf.get("draft", True))
+
+        committed_paths_raw = context.get("committed_paths", [])
+        committed_paths = (
+            [str(item).strip() for item in committed_paths_raw if str(item).strip()]
+            if isinstance(committed_paths_raw, list)
+            else []
+        )
+        context["pr_change_type_checklist_markdown"] = build_pr_change_type_checklist_markdown(
+            issue_title=str(issue.get("title", "")),
+            issue_labels=issue_labels,
+            pr_title=pr_title,
+            committed_paths=committed_paths,
+        )
+        context["pr_auto_checklist_markdown"] = build_pr_auto_checklist_markdown(context)
+        context["pr_manual_checklist_markdown"] = build_pr_manual_checklist_markdown()
 
         validate_required_pr_context(context)
         write_text(pr_body_file, render_template_file(pr_template, context))
