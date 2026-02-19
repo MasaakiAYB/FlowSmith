@@ -1262,13 +1262,26 @@ def ensure_branch(
 ) -> None:
     if sync_base:
         git(["fetch", "origin", base_branch], cwd=repo_root, check=False)
+    git(["fetch", "origin", branch_name], cwd=repo_root, check=False)
 
     git(["checkout", base_branch], cwd=repo_root)
 
     if sync_base:
         git(["pull", "--ff-only", "origin", base_branch], cwd=repo_root, check=False)
 
-    git(["checkout", "-B", branch_name], cwd=repo_root)
+    remote_branch_exists = (
+        git(
+            ["ls-remote", "--exit-code", "--heads", "origin", branch_name],
+            cwd=repo_root,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if remote_branch_exists:
+        git(["checkout", "-B", branch_name, f"origin/{branch_name}"], cwd=repo_root)
+        return
+
+    git(["checkout", "-B", branch_name, base_branch], cwd=repo_root)
 
 
 def setup_entire_trace(
