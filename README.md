@@ -235,6 +235,7 @@ curl -X POST \
 
 - `--feedback-pr-number <PR番号>`: 対象PRから `changes_requested` / レビューコメント / PRコメントを自動抽出
 - `--feedback-file <path>` または `--feedback-text <text>`: 手動で改善指摘を追加
+- `--feedback-pr-number` 指定時は、`--branch-name` 未指定でも対象PRの head ブランチを自動採用（既存PRに追記）
 
 抽出した内容は `run_dir/external_feedback_pr.md` と `external_feedback_status.md` に保存され、
 Planner/Coder/Reviewer プロンプトへ反映されます。

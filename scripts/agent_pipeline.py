@@ -1460,6 +1460,48 @@ def build_pr_feedback_digest(
     }
 
 
+def resolve_feedback_pr_context(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    pr_number: int,
+) -> dict[str, str]:
+    if not repo_slug:
+        raise RuntimeError("feedback_pr_number を使う場合は target repo slug が必要です。")
+    if pr_number <= 0:
+        return {"head_ref": "", "base_ref": "", "url": ""}
+
+    payload = gh_api_json(
+        endpoint=f"repos/{repo_slug}/pulls/{pr_number}",
+        cwd=repo_root,
+    )
+    if not isinstance(payload, dict):
+        raise RuntimeError("PR情報の取得結果が不正です。")
+
+    head_ref = ""
+    head_raw = payload.get("head")
+    if isinstance(head_raw, dict):
+        head_ref = str(head_raw.get("ref") or "").strip()
+
+    base_ref = ""
+    base_raw = payload.get("base")
+    if isinstance(base_raw, dict):
+        base_ref = str(base_raw.get("ref") or "").strip()
+
+    pr_url = str(payload.get("html_url") or "").strip()
+
+    if not head_ref:
+        raise RuntimeError(
+            "feedback_pr_number に対応するPRの head ブランチを取得できませんでした。"
+        )
+
+    return {
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+        "url": pr_url,
+    }
+
+
 def load_feedback_text(
     *,
     control_root: Path,
@@ -3943,12 +3985,28 @@ def main() -> int:
         issue_labels=issue_labels,
     )
 
+    feedback_pr_number = max(int(args.feedback_pr_number or 0), 0)
+    feedback_pr_context = {"head_ref": "", "base_ref": "", "url": ""}
+    if feedback_pr_number > 0:
+        feedback_pr_context = resolve_feedback_pr_context(
+            repo_root=target_repo_root,
+            repo_slug=repo_slug,
+            pr_number=feedback_pr_number,
+        )
+
     config_base_branch = str(config.get("base_branch", "main"))
-    base_branch = args.base_branch or runtime["default_base_branch"] or config_base_branch
+    base_branch = (
+        args.base_branch
+        or runtime["default_base_branch"]
+        or feedback_pr_context["base_ref"]
+        or config_base_branch
+    )
 
     branch_prefix = f"{slugify(project_id)}-" if project_id else ""
-    branch_name = args.branch_name or (
-        f"agent/{branch_prefix}issue-{issue['number']}-{slugify(issue['title'])}"
+    branch_name = (
+        args.branch_name
+        or feedback_pr_context["head_ref"]
+        or f"agent/{branch_prefix}issue-{issue['number']}-{slugify(issue['title'])}"
     )
     max_attempts = int(config.get("max_attempts", 3))
     quality_gates = config.get("quality_gates", [])
@@ -4102,7 +4160,7 @@ def main() -> int:
             repo_slug=repo_slug,
             feedback_file=args.feedback_file,
             feedback_text=str(args.feedback_text or ""),
-            feedback_pr_number=max(int(args.feedback_pr_number or 0), 0),
+            feedback_pr_number=feedback_pr_number,
             feedback_max_items=parse_positive_int(
                 args.feedback_max_items,
                 default=20,

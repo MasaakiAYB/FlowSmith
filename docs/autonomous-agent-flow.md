@@ -15,7 +15,7 @@
 11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
 12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
 13. 人間レビューでマージ可否を判断する
-14. `feedback_pr_number` 指定時はPRレビュー/コメントを抽出して次回の Planner/Coder/Reviewer 入力へ反映する
+14. `feedback_pr_number` 指定時はPRレビュー/コメントを抽出して次回の Planner/Coder/Reviewer 入力へ反映する（`branch_name` 未指定時は対象PRの head ブランチへ自動追従）
 
 ## 外部呼び出し受け口（ディスパッチ）
 
