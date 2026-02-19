@@ -15,24 +15,31 @@
 11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
 12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
 13. 人間レビューでマージ可否を判断する
-14. `feedback_pr_number` 指定時はPRレビュー/コメントを抽出して次回の Planner/Coder/Reviewer 入力へ反映する（`branch_name` 未指定時は対象PRの head ブランチへ自動追従）
+14. PRフィードバック起点では `feedback_pr_number` のレビュー/コメントを抽出し、次回の Planner/Coder/Reviewer 入力へ反映する（差分ゼロ時は成功扱いで終了可能）
 
 ## 外部呼び出し受け口（ディスパッチ）
 
-外部トリガーの受け口は `.github/workflows/autonomous-agent-dispatch.yml`（`自律エージェント ディスパッチ受け口`）です。
+入口を Issue / Feedback で分割しています。
 
-- トリガー: `repository_dispatch`
-- イベント種別: `autonomous-agent-request`
-バリデーション項目:
+- Issue入口: `.github/workflows/autonomous-agent-dispatch.yml`
+- Feedback入口: `.github/workflows/autonomous-agent-feedback-dispatch.yml`
+- 共通実行: `.github/workflows/autonomous-agent-runner.yml`（`workflow_call`）
+
+共通バリデーション:
 1. `client_payload.issue_number` は整数であること
 2. `client_payload.project_id` または `client_payload.target_repo` のどちらかが必要
 3. リポジトリ Secret `DISPATCH_SHARED_SECRET` が設定されている場合は、`client_payload.dispatch_secret` の一致が必要
 
-最小ペイロード:
+### Issue入口
+
+- `event_type`: `autonomous-agent-issue-request`
+- 必須項目: `issue_number`
+- 任意項目: `project_id`, `target_repo`, `base_branch`, `branch_name`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 禁止項目: `feedback_pr_number`, `feedback_text`
 
 ```json
 {
-  "event_type": "autonomous-agent-request",
+  "event_type": "autonomous-agent-issue-request",
   "client_payload": {
     "issue_number": 123,
     "project_id": "sample-webapp"
@@ -40,18 +47,30 @@
 }
 ```
 
-任意ペイロード項目:
+### Feedback入口
 
-- `base_branch`
-- `branch_name`
-- `feedback_pr_number`（対象リポジトリのPR番号。指定時は改善指摘を自動抽出）
-- `feedback_text`（追加で与える改善指摘テキスト）
-- `no_sync`
-- `source_repository`（呼び出し元メタデータ）
-- `request_id`（リクエスト識別子）
+- `event_type`: `autonomous-agent-feedback-request`
+- 必須項目: `issue_number`, `feedback_pr_number`, `branch_name`, `base_branch`
+- 任意項目: `feedback_text`, `project_id`, `target_repo`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 実行時挙動: `--allow-no-changes` を有効化し、差分ゼロは成功扱い（commit/push/PR更新をスキップ）
+
+```json
+{
+  "event_type": "autonomous-agent-feedback-request",
+  "client_payload": {
+    "issue_number": 123,
+    "target_repo": "your-org/your-repo",
+    "feedback_pr_number": 45,
+    "branch_name": "agent/your-repo-issue-123-feature",
+    "base_branch": "main",
+    "feedback_text": "Triggered by: review:changes_requested"
+  }
+}
+```
 
 呼び出し側（対象リポジトリ）でのPRレビュー起点の自動再実行例:
 
+- `docs/examples/trigger-flowsmith-on-issue.yml`
 - `docs/examples/trigger-flowsmith-on-pr-feedback.yml`
 
 ## マルチプロジェクト設定
@@ -140,7 +159,7 @@ UI証跡画像も `ai-logs/.../ui-evidence/` 配下へ同時保存され、PR本
 
 ## Actions実行前の標準セットアップ
 
-FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.yml`）では、パイプライン実行前に次を実施します。
+FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.yml` / `autonomous-agent-feedback-dispatch.yml` / `autonomous-agent-runner.yml`）では、パイプライン実行前に次を実施します。
 
 1. `actions/setup-python@v5` で Python 3.12 をセットアップ
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ

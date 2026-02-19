@@ -1,9 +1,9 @@
-name: 自律エージェント ディスパッチ受け口（Issue）
+name: 自律エージェント ディスパッチ受け口（Feedback）
 
 on:
   repository_dispatch:
     types:
-      - autonomous-agent-issue-request
+      - autonomous-agent-feedback-request
 
 permissions:
   contents: write
@@ -19,11 +19,13 @@ jobs:
       target_repo: ${{ steps.payload.outputs.target_repo }}
       base_branch: ${{ steps.payload.outputs.base_branch }}
       branch_name: ${{ steps.payload.outputs.branch_name }}
+      feedback_pr_number: ${{ steps.payload.outputs.feedback_pr_number }}
       source_repository: ${{ steps.payload.outputs.source_repository }}
       request_id: ${{ steps.payload.outputs.request_id }}
+      feedback_text: ${{ steps.payload.outputs.feedback_text }}
       no_sync: ${{ steps.payload.outputs.no_sync }}
     steps:
-      - name: ペイロード検証（Issue）
+      - name: ペイロード検証（Feedback）
         id: payload
         run: |
           set -euo pipefail
@@ -33,12 +35,11 @@ jobs:
           target_repo="$(jq -r '.client_payload.target_repo // empty | tostring' "$GITHUB_EVENT_PATH")"
           base_branch="$(jq -r '.client_payload.base_branch // empty | tostring' "$GITHUB_EVENT_PATH")"
           branch_name="$(jq -r '.client_payload.branch_name // empty | tostring' "$GITHUB_EVENT_PATH")"
+          feedback_pr_number="$(jq -r '.client_payload.feedback_pr_number // empty | tostring' "$GITHUB_EVENT_PATH")"
           source_repository="$(jq -r '.client_payload.source_repository // empty | tostring' "$GITHUB_EVENT_PATH")"
           request_id="$(jq -r '.client_payload.request_id // empty | tostring' "$GITHUB_EVENT_PATH")"
-          no_sync_raw="$(jq -r '.client_payload.no_sync // false | tostring' "$GITHUB_EVENT_PATH")"
-
-          feedback_pr_number="$(jq -r '.client_payload.feedback_pr_number // empty | tostring' "$GITHUB_EVENT_PATH")"
           feedback_text="$(jq -r '.client_payload.feedback_text // empty | tostring' "$GITHUB_EVENT_PATH")"
+          no_sync_raw="$(jq -r '.client_payload.no_sync // false | tostring' "$GITHUB_EVENT_PATH")"
 
           if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
             echo "client_payload.issue_number は正の整数で指定してください。" >&2
@@ -50,8 +51,18 @@ jobs:
             exit 1
           fi
 
-          if [ -n "$feedback_pr_number" ] || [ -n "$feedback_text" ]; then
-            echo "Issue入口では feedback_pr_number / feedback_text は指定できません。" >&2
+          if ! [[ "$feedback_pr_number" =~ ^[0-9]+$ ]]; then
+            echo "client_payload.feedback_pr_number は正の整数で必須です。" >&2
+            exit 1
+          fi
+
+          if [ -z "$branch_name" ]; then
+            echo "client_payload.branch_name は Feedback 入口では必須です。" >&2
+            exit 1
+          fi
+
+          if [ -z "$base_branch" ]; then
+            echo "client_payload.base_branch は Feedback 入口では必須です。" >&2
             exit 1
           fi
 
@@ -74,21 +85,28 @@ jobs:
           echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
           echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+          echo "feedback_pr_number=$feedback_pr_number" >> "$GITHUB_OUTPUT"
           echo "source_repository=$source_repository" >> "$GITHUB_OUTPUT"
           echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
           echo "no_sync=$no_sync" >> "$GITHUB_OUTPUT"
+          {
+            echo "feedback_text<<EOF"
+            printf '%s\n' "$feedback_text"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: サマリー（Issue）
+      - name: サマリー（Feedback）
         if: ${{ always() }}
         run: |
           {
-            echo "## 受信ペイロード（Issue）"
+            echo "## 受信ペイロード（Feedback）"
             echo ""
             echo "- issue_number: \`${{ steps.payload.outputs.issue_number || '未指定' }}\`"
             echo "- project_id: \`${{ steps.payload.outputs.project_id || '未指定' }}\`"
             echo "- target_repo: \`${{ steps.payload.outputs.target_repo || '未指定' }}\`"
             echo "- base_branch: \`${{ steps.payload.outputs.base_branch || '未指定' }}\`"
             echo "- branch_name: \`${{ steps.payload.outputs.branch_name || '未指定' }}\`"
+            echo "- feedback_pr_number: \`${{ steps.payload.outputs.feedback_pr_number || '未指定' }}\`"
             echo "- no_sync: \`${{ steps.payload.outputs.no_sync || 'false' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -96,14 +114,16 @@ jobs:
     needs: validate-payload
     uses: ./.github/workflows/autonomous-agent-runner.yml
     with:
-      dispatch_mode: issue
+      dispatch_mode: feedback
       issue_number: ${{ needs.validate-payload.outputs.issue_number }}
       project_id: ${{ needs.validate-payload.outputs.project_id }}
       target_repo: ${{ needs.validate-payload.outputs.target_repo }}
       base_branch: ${{ needs.validate-payload.outputs.base_branch }}
       branch_name: ${{ needs.validate-payload.outputs.branch_name }}
+      feedback_pr_number: ${{ needs.validate-payload.outputs.feedback_pr_number }}
       source_repository: ${{ needs.validate-payload.outputs.source_repository }}
       request_id: ${{ needs.validate-payload.outputs.request_id }}
+      feedback_text: ${{ needs.validate-payload.outputs.feedback_text }}
       no_sync: ${{ needs.validate-payload.outputs.no_sync == 'true' }}
-      allow_no_changes: false
+      allow_no_changes: true
     secrets: inherit

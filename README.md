@@ -19,7 +19,9 @@
 - `.agent/prompts/*.md`: Planner / Coder / Reviewer 用プロンプトテンプレート
 - `.agent/templates/pr_body.md`: PR本文テンプレート
 - `.github/workflows/autonomous-agent-pr.yml`: 手動実行用ワークフロー
-- `.github/workflows/autonomous-agent-dispatch.yml`: 外部呼び出しディスパッチ受け口ワークフロー
+- `.github/workflows/autonomous-agent-dispatch.yml`: Issue起点の外部呼び出しディスパッチ受け口
+- `.github/workflows/autonomous-agent-feedback-dispatch.yml`: PRフィードバック起点の外部呼び出しディスパッチ受け口
+- `.github/workflows/autonomous-agent-runner.yml`: 共通実行ワークフロー（`workflow_call`）
 - `scripts/agent_pipeline.py`: Issue から PR までを実行するオーケストレーター
 
 ## セットアップ
@@ -191,27 +193,23 @@ python scripts/agent_pipeline.py \
 
 ## 外部呼び出し受け口（ディスパッチ）
 
-`repository_dispatch` を使って、このリポジトリの `自律エージェント ディスパッチ受け口` ワークフローを起動します。
+`repository_dispatch` の入口は用途別に 2 つです。
 
-`event_type`:
+- Issue 起点: `.github/workflows/autonomous-agent-dispatch.yml`
+- PRフィードバック起点: `.github/workflows/autonomous-agent-feedback-dispatch.yml`
 
-- `autonomous-agent-request`
+共通ルール:
 
-`client_payload` の項目:
+- `issue_number` は必須（整数）
+- `project_id` または `target_repo` のどちらかは必須
+- `DISPATCH_SHARED_SECRET` を設定している場合は `dispatch_secret` が必須
 
-- `issue_number`（必須、整数）
-- `project_id`（任意。`target_repo` 未指定時は必須）
-- `target_repo`（任意。`project_id` 未指定時は必須）
-- `base_branch`（任意）
-- `branch_name`（任意）
-- `feedback_pr_number`（任意。対象リポジトリのPR番号。指定時はPRレビュー/コメントを自動抽出）
-- `feedback_text`（任意。追加で与える改善指摘テキスト）
-- `no_sync`（任意、`true|false`）
-- `source_repository`（任意、呼び出し元メタデータ）
-- `request_id`（任意、リクエスト識別子）
-- `dispatch_secret`（任意。`DISPATCH_SHARED_SECRET` が設定されている場合は必須）
+### 1. Issue 起点
 
-例:
+- `event_type`: `autonomous-agent-issue-request`
+- 必須: `issue_number`
+- 任意: `project_id`, `target_repo`, `base_branch`, `branch_name`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 禁止: `feedback_pr_number`, `feedback_text`
 
 ```bash
 curl -X POST \
@@ -219,12 +217,39 @@ curl -X POST \
   -H "Authorization: Bearer <FLOW_SMITH_DISPATCH_TOKEN>" \
   https://api.github.com/repos/<owner>/FlowSmith/dispatches \
   -d '{
-    "event_type": "autonomous-agent-request",
+    "event_type": "autonomous-agent-issue-request",
     "client_payload": {
       "issue_number": 123,
       "project_id": "sample-webapp",
       "source_repository": "your-org/your-repo",
-      "request_id": "run-20260216-001"
+      "request_id": "issue-123-run-1"
+    }
+  }'
+```
+
+### 2. PRフィードバック起点
+
+- `event_type`: `autonomous-agent-feedback-request`
+- 必須: `issue_number`, `feedback_pr_number`, `branch_name`, `base_branch`
+- 任意: `feedback_text`, `project_id`, `target_repo`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 挙動: `--allow-no-changes` を有効化し、差分ゼロの場合は成功扱い（commit/push/PR更新をスキップ）
+
+```bash
+curl -X POST \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer <FLOW_SMITH_DISPATCH_TOKEN>" \
+  https://api.github.com/repos/<owner>/FlowSmith/dispatches \
+  -d '{
+    "event_type": "autonomous-agent-feedback-request",
+    "client_payload": {
+      "issue_number": 123,
+      "target_repo": "your-org/your-repo",
+      "feedback_pr_number": 45,
+      "branch_name": "agent/your-repo-issue-123-feature",
+      "base_branch": "main",
+      "feedback_text": "Triggered by: review:changes_requested",
+      "source_repository": "your-org/your-repo",
+      "request_id": "pr-feedback-45-run-2"
     }
   }'
 ```
@@ -242,6 +267,7 @@ Planner/Coder/Reviewer プロンプトへ反映されます。
 
 呼び出し側リポジトリでの自動トリガー例:
 
+- `docs/examples/trigger-flowsmith-on-issue.yml`
 - `docs/examples/trigger-flowsmith-on-pr-feedback.yml`
 
 ## 運用ガードレール

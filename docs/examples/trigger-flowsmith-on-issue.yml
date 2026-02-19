@@ -1,0 +1,65 @@
+name: Trigger FlowSmith On Issue
+
+on:
+  issues:
+    types:
+      - opened
+      - labeled
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      ${{
+        contains(github.event.issue.labels.*.name, 'agent-task') ||
+        contains(github.event.issue.labels.*.name, 'agent/')
+      }}
+    runs-on: ubuntu-latest
+    env:
+      FLOW_SMITH_REPO: ${{ vars.FLOW_SMITH_REPO || 'MasaakiAYB/FlowSmith' }}
+      FLOW_SMITH_PROJECT_ID: ${{ vars.FLOW_SMITH_PROJECT_ID || '' }}
+    steps:
+      - name: Validate dispatch token
+        run: |
+          if [ -z "${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}" ]; then
+            echo "Secret FLOW_SMITH_DISPATCH_TOKEN is required." >&2
+            exit 1
+          fi
+
+      - name: Dispatch to FlowSmith
+        env:
+          FLOW_SMITH_DISPATCH_TOKEN: ${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}
+          FLOW_SMITH_DISPATCH_SECRET: ${{ secrets.FLOW_SMITH_DISPATCH_SECRET || '' }}
+        run: |
+          set -euo pipefail
+
+          payload="$(jq -n \
+            --argjson issue_number "${{ github.event.issue.number }}" \
+            --arg target_repo "${{ github.repository }}" \
+            --arg base_branch "${{ github.event.repository.default_branch }}" \
+            --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+            --arg source_repository "${{ github.repository }}" \
+            --arg request_id "issue-${{ github.event.issue.number }}-run-${{ github.run_id }}" \
+            --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
+            '{
+              event_type: "autonomous-agent-issue-request",
+              client_payload: (
+                {
+                  issue_number: $issue_number,
+                  target_repo: $target_repo,
+                  base_branch: $base_branch,
+                  source_repository: $source_repository,
+                  request_id: $request_id,
+                  dispatch_secret: $dispatch_secret
+                } + (if $project_id != "" then {project_id: $project_id} else {} end)
+              )
+            }'
+          )"
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${FLOW_SMITH_DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${FLOW_SMITH_REPO}/dispatches" \
+            -d "$payload"

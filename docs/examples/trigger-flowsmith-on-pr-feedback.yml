@@ -55,6 +55,7 @@ jobs:
 
           pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}")"
           head_ref="$(echo "$pr_json" | jq -r '.head.ref')"
+          base_ref="$(echo "$pr_json" | jq -r '.base.ref')"
           body="$(echo "$pr_json" | jq -r '.body // \"\"')"
 
           issue_number="$(echo "$head_ref" | sed -n 's|.*issue-\([0-9]\+\).*|\1|p' | head -n 1)"
@@ -68,6 +69,8 @@ jobs:
 
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
           echo "issue_number=${issue_number}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+          echo "base_ref=${base_ref}" >> "$GITHUB_OUTPUT"
           echo "trigger_reason=${trigger_reason}" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch to FlowSmith
@@ -90,15 +93,19 @@ jobs:
             --arg pr_number "${{ steps.ctx.outputs.pr_number }}" \
             --arg source_repository "${GITHUB_REPOSITORY}" \
             --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+            --arg branch_name "${{ steps.ctx.outputs.head_ref }}" \
+            --arg base_branch "${{ steps.ctx.outputs.base_ref }}" \
             --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
             --arg request_id "pr-feedback-${{ github.run_id }}-${{ github.run_attempt }}" \
             --arg feedback_text "Triggered by: ${{ steps.ctx.outputs.trigger_reason }}" \
             '{
-              event_type: "autonomous-agent-request",
+              event_type: "autonomous-agent-feedback-request",
               client_payload: {
                 issue_number: ($issue_number | tonumber),
                 target_repo: $source_repository,
                 project_id: $project_id,
+                branch_name: $branch_name,
+                base_branch: $base_branch,
                 feedback_pr_number: ($pr_number | tonumber),
                 feedback_text: $feedback_text,
                 source_repository: $source_repository,
@@ -113,4 +120,3 @@ jobs:
             -H "Authorization: Bearer ${FLOW_SMITH_DISPATCH_TOKEN}" \
             "https://api.github.com/repos/${FLOW_SMITH_REPO}/dispatches" \
             -d "$payload"
-

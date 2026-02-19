@@ -2552,6 +2552,13 @@ def extract_commit_trailer(commit_message: str, trailer_key: str) -> str:
     return match.group(1).strip()
 
 
+def is_no_change_runtime_error(error: RuntimeError) -> bool:
+    message = str(error).strip()
+    if not message:
+        return False
+    return message.startswith("No file changes were created by the coder agent.")
+
+
 def extract_attempt_index(file_name: str) -> int:
     match = re.search(r"_attempt_(\d+)\.md$", file_name)
     if not match:
@@ -3954,6 +3961,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch-name", default=None)
     parser.add_argument("--push", action="store_true")
     parser.add_argument("--create-pr", action="store_true")
+    parser.add_argument(
+        "--allow-no-changes",
+        action="store_true",
+        help="No-op（差分なし）を成功扱いにし、commit/push/PRをスキップする",
+    )
     return parser.parse_args()
 
 
@@ -4135,6 +4147,9 @@ def main() -> int:
         "ui_evidence_appendix": "",
         "committed_paths": [],
         "head_commit": "",
+        "commit_status": "pending",
+        "pr_status": "pending",
+        "no_change_reason": "",
     }
     ui_repo_evidence_dir.mkdir(parents=True, exist_ok=True)
     Path(run_dir / "ui-evidence").mkdir(parents=True, exist_ok=True)
@@ -4398,137 +4413,184 @@ def main() -> int:
             force_add_paths.append(text)
             if bool(context.get("ai_logs_required", True)):
                 required_paths.append(text)
-    commit_state = commit_changes(
-        target_repo_root,
-        commit_message,
-        run_dir=run_dir,
-        config=config,
-        context=context,
-        ignore_paths=ignored_paths,
-        force_add_paths=force_add_paths,
-        required_paths=required_paths,
-    )
-    context.update(commit_state)
-    head_commit = get_head_commit_sha(target_repo_root)
-    context["head_commit"] = head_commit
-    if context.get("ai_logs_status") == "saved" and repo_slug:
-        ai_logs_index_file = str(context.get("ai_logs_index_file", "")).strip()
-        if ai_logs_index_file:
-            ai_logs_publish_mode = str(context.get("ai_logs_publish_mode", "same-branch")).strip()
-            ai_logs_publish_branch = str(context.get("ai_logs_publish_branch", "")).strip()
-            if ai_logs_publish_mode == "dedicated-branch" and ai_logs_publish_branch:
-                context["ai_logs_index_url"] = (
-                    f"https://github.com/{repo_slug}/blob/{ai_logs_publish_branch}/{ai_logs_index_file}"
-                )
-            else:
-                context["ai_logs_index_url"] = (
-                    f"https://github.com/{repo_slug}/blob/{head_commit}/{ai_logs_index_file}"
-                )
-    context["log_location_markdown"] = render_log_location_markdown(context)
-
-    entire_checkpoint = ""
-    if context.get("entire_status") == "enabled" and context.get("entire_verify_trailer"):
-        commit_body = get_head_commit_message(target_repo_root)
-        trailer_key = str(context.get("entire_trailer_key", "Entire-Checkpoint"))
-        entire_checkpoint = extract_commit_trailer(commit_body, trailer_key)
-        if not entire_checkpoint:
-            message = (
-                "コミットメッセージに Entire 証跡トレーラーが見つかりません。"
-                f" trailer_key={trailer_key}"
+    commit_skipped_no_change = False
+    try:
+        commit_state = commit_changes(
+            target_repo_root,
+            commit_message,
+            run_dir=run_dir,
+            config=config,
+            context=context,
+            ignore_paths=ignored_paths,
+            force_add_paths=force_add_paths,
+            required_paths=required_paths,
+        )
+        context.update(commit_state)
+        context["commit_status"] = "committed"
+    except RuntimeError as err:
+        if args.allow_no_changes and is_no_change_runtime_error(err):
+            commit_skipped_no_change = True
+            no_change_reason = str(err).strip()
+            context["commit_status"] = "skipped-no-change"
+            context["pr_status"] = "skipped-no-change"
+            context["no_change_reason"] = no_change_reason
+            context["head_commit"] = "(no-change)"
+            context["entire_checkpoint"] = "no-change"
+            context["entire_trace_verify_status"] = "skipped-no-change"
+            context["entire_explain_status"] = "skipped-no-change"
+            write_text(
+                run_dir / "no_change.md",
+                (
+                    "# No Change\n\n"
+                    "- status: `skipped-no-change`\n"
+                    f"- reason: `{no_change_reason}`\n"
+                    "- note: `--allow-no-changes` により成功扱いで終了\n"
+                ),
             )
-            if bool(context.get("entire_required")):
-                raise RuntimeError(message)
-            log(f"WARNING: {message}")
+            write_text(
+                run_dir / "entire_trace.md",
+                (
+                    "# Entire 証跡\n\n"
+                    f"- status: `{context.get('entire_status')}`\n"
+                    f"- trailer_key: `{context.get('entire_trailer_key')}`\n"
+                    "- checkpoint: `no-change`\n"
+                    "- commit: `(no-change)`\n"
+                    f"- trace_status: `{context.get('entire_trace_status')}`\n"
+                    f"- trace_file: `{context.get('entire_trace_file')}`\n"
+                    f"- trace_sha256: `{context.get('entire_trace_sha256')}`\n"
+                    "- trace_verify_status: `skipped-no-change`\n"
+                    "- explain_status: `skipped-no-change`\n"
+                    f"- explain_log: `{context.get('entire_explain_log')}`\n"
+                ),
+            )
+            log("No meaningful changes were detected. Skipped commit/push/pr.")
+        else:
+            raise
 
-    explicit_verify_state = verify_entire_explicit_registration(
-        repo_root=target_repo_root,
-        run_dir=run_dir,
-        context=context,
-    )
-    context.update(explicit_verify_state)
+    if not commit_skipped_no_change:
+        head_commit = get_head_commit_sha(target_repo_root)
+        context["head_commit"] = head_commit
+        if context.get("ai_logs_status") == "saved" and repo_slug:
+            ai_logs_index_file = str(context.get("ai_logs_index_file", "")).strip()
+            if ai_logs_index_file:
+                ai_logs_publish_mode = str(context.get("ai_logs_publish_mode", "same-branch")).strip()
+                ai_logs_publish_branch = str(context.get("ai_logs_publish_branch", "")).strip()
+                if ai_logs_publish_mode == "dedicated-branch" and ai_logs_publish_branch:
+                    context["ai_logs_index_url"] = (
+                        f"https://github.com/{repo_slug}/blob/{ai_logs_publish_branch}/{ai_logs_index_file}"
+                    )
+                else:
+                    context["ai_logs_index_url"] = (
+                        f"https://github.com/{repo_slug}/blob/{head_commit}/{ai_logs_index_file}"
+                    )
+        context["log_location_markdown"] = render_log_location_markdown(context)
 
-    explain_state = generate_entire_explain(
-        repo_root=target_repo_root,
-        run_dir=run_dir,
-        context=context,
-    )
-    context.update(explain_state)
+        entire_checkpoint = ""
+        if context.get("entire_status") == "enabled" and context.get("entire_verify_trailer"):
+            commit_body = get_head_commit_message(target_repo_root)
+            trailer_key = str(context.get("entire_trailer_key", "Entire-Checkpoint"))
+            entire_checkpoint = extract_commit_trailer(commit_body, trailer_key)
+            if not entire_checkpoint:
+                message = (
+                    "コミットメッセージに Entire 証跡トレーラーが見つかりません。"
+                    f" trailer_key={trailer_key}"
+                )
+                if bool(context.get("entire_required")):
+                    raise RuntimeError(message)
+                log(f"WARNING: {message}")
 
-    context["entire_checkpoint"] = entire_checkpoint or "未検出"
-    write_text(
-        run_dir / "entire_trace.md",
-        (
-            "# Entire 証跡\n\n"
-            f"- status: `{context.get('entire_status')}`\n"
-            f"- trailer_key: `{context.get('entire_trailer_key')}`\n"
-            f"- checkpoint: `{context.get('entire_checkpoint')}`\n"
-            f"- commit: `{head_commit}`\n"
-            f"- trace_status: `{context.get('entire_trace_status')}`\n"
-            f"- trace_file: `{context.get('entire_trace_file')}`\n"
-            f"- trace_sha256: `{context.get('entire_trace_sha256')}`\n"
-            f"- trace_verify_status: `{context.get('entire_trace_verify_status')}`\n"
-            f"- explain_status: `{context.get('entire_explain_status')}`\n"
-            f"- explain_log: `{context.get('entire_explain_log')}`\n"
-        ),
-    )
-    log(f"Committed changes on {branch_name}")
-
-    if args.push:
-        push_branch(target_repo_root, branch_name)
-        log("Pushed branch to origin")
-
-    if args.create_pr:
-        if not args.push:
-            raise RuntimeError("--create-pr requires --push.")
-
-        pr_conf = config.get("pr", {})
-        pr_title_template = str(
-            pr_conf.get("title", "{pr_title_default}")
-        ).strip() or "{pr_title_default}"
-        pr_title = format_template(
-            pr_title_template,
-            context,
-            "pr.title",
-        ).strip()
-        if not pr_title:
-            pr_title = str(context.get("pr_title_default", "")).strip() or str(issue["title"]).strip()
-        pr_labels = parse_string_list(
-            pr_conf.get("labels"),
-            default=[],
-            name="pr.labels",
-        )
-        pr_labels_required = bool(pr_conf.get("labels_required", True))
-        pr_draft = bool(pr_conf.get("draft", False))
-
-        committed_paths_raw = context.get("committed_paths", [])
-        committed_paths = (
-            [str(item).strip() for item in committed_paths_raw if str(item).strip()]
-            if isinstance(committed_paths_raw, list)
-            else []
-        )
-        context["pr_change_type_checklist_markdown"] = build_pr_change_type_checklist_markdown(
-            issue_title=str(issue.get("title", "")),
-            issue_labels=issue_labels,
-            pr_title=pr_title,
-            committed_paths=committed_paths,
-        )
-        context["pr_auto_checklist_markdown"] = build_pr_auto_checklist_markdown(context)
-        context["pr_manual_checklist_markdown"] = build_pr_manual_checklist_markdown()
-
-        validate_required_pr_context(context)
-        write_text(pr_body_file, render_template_file(pr_template, context))
-        pr_url = create_or_update_pr(
+        explicit_verify_state = verify_entire_explicit_registration(
             repo_root=target_repo_root,
-            repo_slug=repo_slug,
-            base_branch=base_branch,
-            branch_name=branch_name,
-            title=pr_title,
-            body_file=pr_body_file,
-            labels=pr_labels,
-            labels_required=pr_labels_required,
-            draft=pr_draft,
+            run_dir=run_dir,
+            context=context,
         )
-        write_text(run_dir / "pr_url.txt", pr_url + "\n")
+        context.update(explicit_verify_state)
+
+        explain_state = generate_entire_explain(
+            repo_root=target_repo_root,
+            run_dir=run_dir,
+            context=context,
+        )
+        context.update(explain_state)
+
+        context["entire_checkpoint"] = entire_checkpoint or "未検出"
+        write_text(
+            run_dir / "entire_trace.md",
+            (
+                "# Entire 証跡\n\n"
+                f"- status: `{context.get('entire_status')}`\n"
+                f"- trailer_key: `{context.get('entire_trailer_key')}`\n"
+                f"- checkpoint: `{context.get('entire_checkpoint')}`\n"
+                f"- commit: `{head_commit}`\n"
+                f"- trace_status: `{context.get('entire_trace_status')}`\n"
+                f"- trace_file: `{context.get('entire_trace_file')}`\n"
+                f"- trace_sha256: `{context.get('entire_trace_sha256')}`\n"
+                f"- trace_verify_status: `{context.get('entire_trace_verify_status')}`\n"
+                f"- explain_status: `{context.get('entire_explain_status')}`\n"
+                f"- explain_log: `{context.get('entire_explain_log')}`\n"
+            ),
+        )
+        log(f"Committed changes on {branch_name}")
+
+        if args.push:
+            push_branch(target_repo_root, branch_name)
+            log("Pushed branch to origin")
+
+        if args.create_pr:
+            if not args.push:
+                raise RuntimeError("--create-pr requires --push.")
+
+            pr_conf = config.get("pr", {})
+            pr_title_template = str(
+                pr_conf.get("title", "{pr_title_default}")
+            ).strip() or "{pr_title_default}"
+            pr_title = format_template(
+                pr_title_template,
+                context,
+                "pr.title",
+            ).strip()
+            if not pr_title:
+                pr_title = str(context.get("pr_title_default", "")).strip() or str(issue["title"]).strip()
+            pr_labels = parse_string_list(
+                pr_conf.get("labels"),
+                default=[],
+                name="pr.labels",
+            )
+            pr_labels_required = bool(pr_conf.get("labels_required", True))
+            pr_draft = bool(pr_conf.get("draft", False))
+
+            committed_paths_raw = context.get("committed_paths", [])
+            committed_paths = (
+                [str(item).strip() for item in committed_paths_raw if str(item).strip()]
+                if isinstance(committed_paths_raw, list)
+                else []
+            )
+            context["pr_change_type_checklist_markdown"] = build_pr_change_type_checklist_markdown(
+                issue_title=str(issue.get("title", "")),
+                issue_labels=issue_labels,
+                pr_title=pr_title,
+                committed_paths=committed_paths,
+            )
+            context["pr_auto_checklist_markdown"] = build_pr_auto_checklist_markdown(context)
+            context["pr_manual_checklist_markdown"] = build_pr_manual_checklist_markdown()
+
+            validate_required_pr_context(context)
+            write_text(pr_body_file, render_template_file(pr_template, context))
+            pr_url = create_or_update_pr(
+                repo_root=target_repo_root,
+                repo_slug=repo_slug,
+                base_branch=base_branch,
+                branch_name=branch_name,
+                title=pr_title,
+                body_file=pr_body_file,
+                labels=pr_labels,
+                labels_required=pr_labels_required,
+                draft=pr_draft,
+            )
+            write_text(run_dir / "pr_url.txt", pr_url + "\n")
+            context["pr_status"] = "created-or-updated"
+        else:
+            context["pr_status"] = "skipped"
 
     write_text(
         run_dir / "summary.md",
@@ -4539,7 +4601,10 @@ def main() -> int:
             f"- Target path: `{target_repo_root}`\n"
             f"- Issue: `#{issue['number']}`\n"
             f"- Branch: `{branch_name}`\n"
+            f"- Commit status: `{context['commit_status']}`\n"
             f"- Commit: `{context['head_commit']}`\n"
+            f"- PR status: `{context['pr_status']}`\n"
+            f"- No change reason: `{context['no_change_reason'] or 'N/A'}`\n"
             f"- Entire checkpoint: `{context['entire_checkpoint']}`\n"
             f"- Entire trace file: `{context['entire_trace_file']}`\n"
             f"- Entire trace sha256: `{context['entire_trace_sha256']}`\n"
