@@ -855,6 +855,15 @@ def build_blob_url(*, repo_slug: str, ref: str, path: str) -> str:
     return f"https://github.com/{normalized_repo}/blob/{normalized_ref}/{normalized_path}"
 
 
+def to_raw_blob_url(url: str) -> str:
+    text = str(url).strip()
+    if not text:
+        return ""
+    if "?" in text:
+        return text + "&raw=1"
+    return text + "?raw=1"
+
+
 def build_ui_evidence_ai_logs_context(
     *,
     context: dict[str, Any],
@@ -912,9 +921,10 @@ def build_ui_evidence_ai_logs_context(
             urls.append(url)
 
     links_markdown = "\n".join(f"- {url}" for url in urls[:8]) or "- `(なし)`"
+    embed_urls = [converted for converted in (to_raw_blob_url(url) for url in urls[:4]) if converted]
     embeds_markdown = "\n".join(
         f"![UI Evidence {idx + 1}]({url})"
-        for idx, url in enumerate(urls[:4])
+        for idx, url in enumerate(embed_urls)
     ) or "_画像はありません。_"
 
     return {
