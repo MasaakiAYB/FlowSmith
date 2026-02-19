@@ -1,4 +1,10 @@
 {
+  "templates": {
+    "planner": "../prompts/planner.md",
+    "coder": "../prompts/coder.md",
+    "reviewer": "../prompts/reviewer.md",
+    "pr_body": "../templates/pr_body.md"
+  },
   "quality_gates": [
     "git diff --check"
   ],
