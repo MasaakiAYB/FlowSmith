@@ -111,22 +111,9 @@ jobs:
           target_repo="${{ inputs.target_repo }}"
 
           if [ -z "$target_repo" ] && [ -n "${PROJECT_ID:-}" ]; then
-            target_repo="$(python - <<'PY'
-import json
-import os
-from pathlib import Path
-project_id = os.getenv("PROJECT_ID", "").strip()
-if not project_id:
-    print("")
-    raise SystemExit(0)
-payload = json.loads(Path('.agent/projects.json').read_text(encoding='utf-8'))
-project = payload.get('projects', {}).get(project_id, {})
-if isinstance(project, dict):
-    print(str(project.get('repo', '')).strip())
-else:
-    print("")
-PY
-)"
+            target_repo="$(
+              PROJECT_ID="$PROJECT_ID" python -c 'import json, os; from pathlib import Path; project_id=os.getenv("PROJECT_ID", "").strip(); payload=json.loads(Path(".agent/projects.json").read_text(encoding="utf-8")) if project_id else {}; project=payload.get("projects", {}).get(project_id, {}) if isinstance(payload, dict) else {}; print(str(project.get("repo", "")).strip() if isinstance(project, dict) else "")'
+            )"
           fi
 
           if [ -z "$target_repo" ]; then
