@@ -3027,18 +3027,16 @@ def fetch_pr_label_names(
     repo_slug: str,
     pr_ref: str,
 ) -> set[str]:
-    repo_args = ["--repo", repo_slug] if repo_slug else []
+    pr_number = resolve_pr_number(pr_ref)
+    if not repo_slug or not pr_number:
+        return set()
     proc = run_process(
         [
             "gh",
-            "pr",
-            "view",
-            pr_ref,
-            *repo_args,
-            "--json",
-            "labels",
+            "api",
+            f"repos/{repo_slug}/issues/{pr_number}/labels",
             "--jq",
-            ".labels[].name",
+            ".[].name",
         ],
         cwd=repo_root,
         check=False,
@@ -3047,11 +3045,21 @@ def fetch_pr_label_names(
         detail = (proc.stderr or proc.stdout or "").strip()
         log(
             "WARNING: PRラベル一覧の取得に失敗しました。"
-            f" pr={pr_ref}"
+            f" pr={pr_ref} number={pr_number}"
             + (f" detail={detail}" if detail else "")
         )
         return set()
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+def resolve_pr_number(pr_ref: str) -> str:
+    text = str(pr_ref).strip()
+    if re.fullmatch(r"\d+", text):
+        return text
+    match = re.search(r"/pull/(\d+)", text)
+    if match:
+        return match.group(1)
+    return ""
 
 
 def add_labels_to_pr(
@@ -3066,7 +3074,14 @@ def add_labels_to_pr(
     if not requested_labels:
         return
 
-    repo_args = ["--repo", repo_slug] if repo_slug else []
+    pr_number = resolve_pr_number(pr_ref)
+    if not pr_number:
+        message = f"PR番号を解決できませんでした: {pr_ref}"
+        if labels_required:
+            raise RuntimeError(message)
+        log(f"WARNING: {message}")
+        return
+
     resolved_labels = resolve_pr_labels_for_repo(
         repo_root=repo_root,
         repo_slug=repo_slug,
@@ -3078,16 +3093,31 @@ def add_labels_to_pr(
         return
 
     for normalized in resolved_labels:
-        proc = run_process(
-            ["gh", "pr", "edit", pr_ref, *repo_args, "--add-label", normalized],
-            cwd=repo_root,
-            check=False,
-        )
+        if repo_slug:
+            proc = run_process(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    f"repos/{repo_slug}/issues/{pr_number}/labels",
+                    "-f",
+                    f"labels[]={normalized}",
+                ],
+                cwd=repo_root,
+                check=False,
+            )
+        else:
+            proc = run_process(
+                ["gh", "pr", "edit", pr_number, "--add-label", normalized],
+                cwd=repo_root,
+                check=False,
+            )
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
             log(
                 "WARNING: PRラベル追加に失敗しました。"
-                f" pr={pr_ref} label={normalized}"
+                f" pr={pr_ref} number={pr_number} label={normalized}"
                 + (f" detail={detail}" if detail else "")
             )
 
