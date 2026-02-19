@@ -8,7 +8,7 @@
     },
     "generated-sample-repo": {
       "repo": "MasaakiAYB/GeneratedSampleRepo",
-      "local_path": "/home/ayabe/workspace/github/GeneratedSampleRepo",
+      "local_path": ".agent/workspaces/generated-sample-repo",
       "base_branch": "main",
       "config": "projects/generated-sample.pipeline.json"
     }
