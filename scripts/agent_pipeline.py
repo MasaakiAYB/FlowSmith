@@ -1165,6 +1165,18 @@ def normalize_repo_slug(raw: str) -> str:
     return value.removesuffix(".git")
 
 
+def split_repo_slug(repo_slug: str) -> tuple[str, str]:
+    normalized = normalize_repo_slug(repo_slug)
+    if "/" not in normalized:
+        raise RuntimeError(f"Invalid repository slug: {repo_slug}")
+    owner, name = normalized.split("/", 1)
+    owner = owner.strip()
+    name = name.strip()
+    if not owner or not name:
+        raise RuntimeError(f"Invalid repository slug: {repo_slug}")
+    return owner, name
+
+
 def detect_repo_slug(repo_root: Path) -> str:
     remote = git(["remote", "get-url", "origin"], cwd=repo_root, check=False)
     if remote.returncode != 0:
@@ -3651,9 +3663,170 @@ def create_or_update_pr(
     labels_required: bool,
     draft: bool,
 ) -> str:
+    body_text = read_text(body_file)
+
+    # repo slug がある通常運用では REST API を優先し、GraphQL 依存を避ける。
+    if repo_slug:
+        owner, _ = split_repo_slug(repo_slug)
+
+        def parse_api_json(proc: subprocess.CompletedProcess[str], endpoint: str) -> Any:
+            try:
+                return json.loads(proc.stdout or "null")
+            except json.JSONDecodeError as err:
+                raise RuntimeError(f"GitHub API returned invalid JSON: {endpoint}") from err
+
+        def find_open_pr_by_head() -> list[dict[str, Any]]:
+            head_ref = quote(f"{owner}:{branch_name}", safe="")
+            endpoint = f"repos/{repo_slug}/pulls?state=open&head={head_ref}&per_page=100"
+            payload = gh_api_json(endpoint=endpoint, cwd=repo_root)
+            if not isinstance(payload, list):
+                return []
+            result: list[dict[str, Any]] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                number = item.get("number")
+                if not isinstance(number, int):
+                    continue
+                result.append(
+                    {
+                        "number": str(number),
+                        "url": str(item.get("html_url") or ""),
+                        "isDraft": bool(item.get("draft", False)),
+                    }
+                )
+            return result
+
+        def mark_pr_ready_for_review(pr_ref: str) -> None:
+            endpoint = f"repos/{repo_slug}/pulls/{pr_ref}/ready_for_review"
+            proc = run_process(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "POST",
+                    endpoint,
+                ],
+                cwd=repo_root,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return
+            detail = (proc.stderr or proc.stdout or "").strip()
+            lowered = detail.lower()
+            already_ready_markers = (
+                "already marked as ready for review",
+                "not in draft state",
+                "is not a draft",
+                "not a draft pull request",
+            )
+            if any(marker in lowered for marker in already_ready_markers):
+                return
+            raise RuntimeError(
+                "PR を Draft 解除できませんでした。\n"
+                + (f"detail:\n{detail}" if detail else "")
+            )
+
+        current = find_open_pr_by_head()
+
+        if current:
+            number = str(current[0]["number"])
+            endpoint = f"repos/{repo_slug}/pulls/{number}"
+            updated_proc = run_process(
+                [
+                    "gh",
+                    "api",
+                    "-X",
+                    "PATCH",
+                    endpoint,
+                    "-f",
+                    f"title={title}",
+                    "-f",
+                    f"body={body_text}",
+                ],
+                cwd=repo_root,
+                check=True,
+            )
+            updated_payload = parse_api_json(updated_proc, endpoint)
+            updated_url = ""
+            updated_is_draft = bool(current[0].get("isDraft", False))
+            if isinstance(updated_payload, dict):
+                updated_url = str(updated_payload.get("html_url") or "")
+                updated_is_draft = bool(updated_payload.get("draft", updated_is_draft))
+
+            add_labels_to_pr(
+                repo_root=repo_root,
+                repo_slug=repo_slug,
+                pr_ref=number,
+                labels=labels,
+                labels_required=labels_required,
+            )
+            if not draft and updated_is_draft:
+                mark_pr_ready_for_review(number)
+            pr_url = updated_url or str(current[0].get("url") or f"https://github.com/{repo_slug}/pull/{number}")
+            log(f"Updated existing PR: {pr_url}")
+            return pr_url
+
+        endpoint = f"repos/{repo_slug}/pulls"
+        create_cmd = [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            endpoint,
+            "-f",
+            f"title={title}",
+            "-f",
+            f"head={branch_name}",
+            "-f",
+            f"base={base_branch}",
+            "-f",
+            f"body={body_text}",
+        ]
+        if draft:
+            create_cmd.extend(["-F", "draft=true"])
+
+        created_proc = run_process(create_cmd, cwd=repo_root, check=True)
+        created_payload = parse_api_json(created_proc, endpoint)
+        pr_ref_for_label = ""
+        created_pr_is_draft = False
+        pr_url = ""
+        if isinstance(created_payload, dict):
+            number = created_payload.get("number")
+            if isinstance(number, int):
+                pr_ref_for_label = str(number)
+            pr_url = str(created_payload.get("html_url") or "")
+            created_pr_is_draft = bool(created_payload.get("draft", False))
+
+        if not pr_ref_for_label:
+            current_after_create = find_open_pr_by_head()
+            if current_after_create:
+                pr_ref_for_label = str(current_after_create[0]["number"])
+                if not pr_url:
+                    pr_url = str(current_after_create[0].get("url", ""))
+                created_pr_is_draft = bool(current_after_create[0].get("isDraft", created_pr_is_draft))
+
+        if not pr_ref_for_label:
+            raise RuntimeError("作成したPR番号を解決できませんでした。")
+
+        add_labels_to_pr(
+            repo_root=repo_root,
+            repo_slug=repo_slug,
+            pr_ref=pr_ref_for_label,
+            labels=labels,
+            labels_required=labels_required,
+        )
+        if not draft and created_pr_is_draft:
+            mark_pr_ready_for_review(pr_ref_for_label)
+        if not pr_url:
+            pr_url = f"https://github.com/{repo_slug}/pull/{pr_ref_for_label}"
+        log(f"Created PR: {pr_url}")
+        return pr_url
+
+    # ローカル単体実行など repo_slug が無い場合は従来の gh pr コマンドを使う。
     repo_args = ["--repo", repo_slug] if repo_slug else []
 
-    def mark_pr_ready_for_review(pr_ref: str) -> None:
+    def mark_pr_ready_for_review_legacy(pr_ref: str) -> None:
         proc = run_process(
             ["gh", "pr", "ready", pr_ref, *repo_args],
             cwd=repo_root,
@@ -3675,7 +3848,7 @@ def create_or_update_pr(
             + (f"detail:\n{detail}" if detail else "")
         )
 
-    def find_open_pr_by_head() -> list[dict[str, Any]]:
+    def find_open_pr_by_head_legacy() -> list[dict[str, Any]]:
         existing = run_process(
             [
                 "gh",
@@ -3697,8 +3870,7 @@ def create_or_update_pr(
             return []
         return [item for item in loaded if isinstance(item, dict)]
 
-    current = find_open_pr_by_head()
-
+    current = find_open_pr_by_head_legacy()
     if current:
         number = str(current[0]["number"])
         is_draft = bool(current[0].get("isDraft", False))
@@ -3725,8 +3897,8 @@ def create_or_update_pr(
             labels_required=labels_required,
         )
         if not draft and is_draft:
-            mark_pr_ready_for_review(number)
-        pr_url = current[0]["url"]
+            mark_pr_ready_for_review_legacy(number)
+        pr_url = str(current[0].get("url") or "")
         log(f"Updated existing PR: {pr_url}")
         return pr_url
 
@@ -3749,7 +3921,7 @@ def create_or_update_pr(
 
     created = run_process(cmd, cwd=repo_root, check=True)
     pr_url = created.stdout.strip().splitlines()[-1]
-    current_after_create = find_open_pr_by_head()
+    current_after_create = find_open_pr_by_head_legacy()
     pr_ref_for_label = pr_url
     created_pr_is_draft = False
     if current_after_create:
@@ -3764,7 +3936,7 @@ def create_or_update_pr(
         labels_required=labels_required,
     )
     if not draft and created_pr_is_draft:
-        mark_pr_ready_for_review(str(pr_ref_for_label))
+        mark_pr_ready_for_review_legacy(str(pr_ref_for_label))
     log(f"Created PR: {pr_url}")
     return pr_url
 
