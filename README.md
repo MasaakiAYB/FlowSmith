@@ -158,81 +158,399 @@ python scripts/agent_pipeline.py \
 `--project` を使わず外部リポジトリを実行する場合は、`.agent/pipeline.json` の `target_repo_defaults` が自動適用されます。
 この仕組みで、リポジトリ追加のたびに `.agent/projects.json` を増やさなくても、共通の安全設定を標準化できます。
 
-## GitHub Actions利用
+## GitHub Actions利用（詳細）
 
-`自律エージェント PR` ワークフローを使い、次の入力を渡します。
+FlowSmith を運用するときは、次の2層で設定します。
 
-- `issue_number`（必須）
-- `project_id`（任意、`.agent/projects.json` のID）
-- `target_repo`（任意、対象リポジトリの上書き）
-- `base_branch`（任意、ベースブランチの上書き）
+1. FlowSmith リポジトリ側: 受け口ワークフローと実行環境を管理
+2. 呼び出し側リポジトリ: `repository_dispatch` を送るトリガーワークフローを実装
 
-ワークフローで参照する Secrets:
+### FlowSmithリポジトリ側のワークフロー
 
-- `AGENT_PLANNER_CMD`
-- `AGENT_CODER_CMD`
+- Issue受け口: `.github/workflows/autonomous-agent-dispatch.yml`
+- PRフィードバック受け口: `.github/workflows/autonomous-agent-feedback-dispatch.yml`
+- 共通ランナー: `.github/workflows/autonomous-agent-runner.yml`
+- 手動実行: `.github/workflows/autonomous-agent-pr.yml`
+
+`autonomous-agent-runner.yml` の標準処理:
+
+1. Python/Node.js と日本語フォントをセットアップ
+2. `codex` CLI をインストール
+3. `CODEX_AUTH_JSON_B64` または `OPENAI_API_KEY` で認証
+4. `AGENT_SETUP_SCRIPT`（任意）を実行
+5. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を事前検証
+6. `scripts/agent_pipeline.py` を実行して commit / push / PR作成・更新
+7. 実行ログを artifact 保存
+
+FlowSmith側で参照する Secrets:
+
+- `AGENT_PLANNER_CMD`（必須）
+- `AGENT_CODER_CMD`（必須）
 - `AGENT_REVIEWER_CMD`（任意）
-- `OPENAI_API_KEY`（任意。`codex` の API キー認証に使用）
-- `CODEX_AUTH_JSON_B64`（任意。`~/.codex/auth.json` を base64 化して設定する暫定手段）
-- `AGENT_SETUP_SCRIPT`（任意。追加ツールを入れるためのシェルスクリプト）
-- `CROSS_REPO_GH_TOKEN`（任意、クロスリポジトリPRでは推奨）
+- `OPENAI_API_KEY`（推奨）
+- `CODEX_AUTH_JSON_B64`（代替）
+- `AGENT_SETUP_SCRIPT`（任意）
+- `CROSS_REPO_GH_TOKEN`（クロスリポジトリ更新時に推奨）
+- `DISPATCH_SHARED_SECRET`（受け口保護に推奨）
 
-ワークフロー内の標準インストール手順:
+`CODEX_AUTH_JSON_B64` は検証用途の代替手段です。安定運用は `OPENAI_API_KEY` を推奨します。
 
-1. `actions/setup-python@v5` で Python 3.12 をセットアップ
-2. `actions/setup-node@v4` で Node.js 22 をセットアップ
-3. `fonts-noto-cjk` / `fonts-ipafont-*` を導入して日本語フォントをセットアップ（UI証跡の文字化け防止）
-4. `npm install -g @openai/codex` で `codex` CLI をインストール（既存ならスキップ）
-5. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
-6. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
-7. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
-8. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
-9. 実行後、`.agent/runs/...` を `agent-run-<run_id>-<run_attempt>` artifact として保存（UI証跡を含む）
+### 呼び出し側リポジトリで設定する Secrets/Variables
 
-`CODEX_AUTH_JSON_B64` は検証用途の暫定手段です。安定運用は `OPENAI_API_KEY` の利用を推奨します。
+FlowSmithを呼び出す側（業務アプリ側）には、次を設定します。
 
-## 外部呼び出し受け口（ディスパッチ）
+- Secret `FLOW_SMITH_DISPATCH_TOKEN`: FlowSmith リポジトリに `repository_dispatch` 可能なトークン
+- Secret `FLOW_SMITH_DISPATCH_SECRET`: FlowSmith 側の `DISPATCH_SHARED_SECRET` と同じ値（設定している場合）
+- Variable `FLOW_SMITH_REPO`: `owner/FlowSmith` 形式（例: `MasaakiAYB/FlowSmith`）
+- Variable `FLOW_SMITH_PROJECT_ID`: FlowSmith の `.agent/projects.json` を使うときのみ指定
 
-`repository_dispatch` の入口は用途別に 2 つです。
+トリガーワークフローの最小 `permissions`:
 
-- Issue 起点: `.github/workflows/autonomous-agent-dispatch.yml`
-- PRフィードバック起点: `.github/workflows/autonomous-agent-feedback-dispatch.yml`
+- Issue起点: `contents: read`
+- PRフィードバック起点: `contents: read`, `pull-requests: read`, `issues: read`
+
+### 呼び出し側Actions実装例 1: Issue作成で自動起動
+
+ファイル例: `.github/workflows/flowsmith-on-issue.yml`
+
+```yaml
+name: Trigger FlowSmith On Issue
+
+on:
+  issues:
+    types:
+      - opened
+      - labeled
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      ${{
+        contains(github.event.issue.labels.*.name, 'agent-task') ||
+        contains(github.event.issue.labels.*.name, 'agent/')
+      }}
+    runs-on: ubuntu-latest
+    env:
+      FLOW_SMITH_REPO: ${{ vars.FLOW_SMITH_REPO || 'MasaakiAYB/FlowSmith' }}
+      FLOW_SMITH_PROJECT_ID: ${{ vars.FLOW_SMITH_PROJECT_ID || '' }}
+    steps:
+      - name: Validate dispatch token
+        run: |
+          if [ -z "${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}" ]; then
+            echo "Secret FLOW_SMITH_DISPATCH_TOKEN is required." >&2
+            exit 1
+          fi
+
+      - name: Dispatch to FlowSmith
+        env:
+          FLOW_SMITH_DISPATCH_TOKEN: ${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}
+          FLOW_SMITH_DISPATCH_SECRET: ${{ secrets.FLOW_SMITH_DISPATCH_SECRET || '' }}
+        run: |
+          set -euo pipefail
+
+          payload="$(jq -n \
+            --argjson issue_number "${{ github.event.issue.number }}" \
+            --arg target_repo "${{ github.repository }}" \
+            --arg base_branch "${{ github.event.repository.default_branch }}" \
+            --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+            --arg source_repository "${{ github.repository }}" \
+            --arg request_id "issue-${{ github.event.issue.number }}-run-${{ github.run_id }}" \
+            --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
+            '{
+              event_type: "autonomous-agent-issue-request",
+              client_payload: (
+                {
+                  issue_number: $issue_number,
+                  target_repo: $target_repo,
+                  base_branch: $base_branch,
+                  source_repository: $source_repository,
+                  request_id: $request_id,
+                  dispatch_secret: $dispatch_secret
+                } + (if $project_id != "" then {project_id: $project_id} else {} end)
+              )
+            }'
+          )"
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${FLOW_SMITH_DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${FLOW_SMITH_REPO}/dispatches" \
+            -d "$payload"
+```
+
+### 呼び出し側Actions実装例 2: PRレビュー/コメントで再実行
+
+ファイル例: `.github/workflows/flowsmith-on-pr-feedback.yml`
+
+```yaml
+name: Trigger FlowSmith On PR Feedback
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve PR context
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          event_name="${{ github.event_name }}"
+          pr_number=""
+          trigger_reason=""
+
+          if [ "$event_name" = "pull_request_review" ]; then
+            state="${{ github.event.review.state }}"
+            if [ "$state" != "changes_requested" ] && [ "$state" != "commented" ]; then
+              echo "changes_requested / commented 以外はスキップします。"
+              exit 0
+            fi
+            pr_number="${{ github.event.pull_request.number }}"
+            trigger_reason="review:${state}"
+          elif [ "$event_name" = "issue_comment" ]; then
+            if [ "${{ github.event.issue.pull_request.url != '' }}" != "true" ]; then
+              echo "PR以外のIssueコメントは対象外です。"
+              exit 0
+            fi
+            body="${{ github.event.comment.body }}"
+            if ! echo "$body" | grep -Eiq '^/agent\s+(fix|retry)\b'; then
+              echo "/agent fix または /agent retry 指示のみ対象です。"
+              exit 0
+            fi
+            pr_number="${{ github.event.issue.number }}"
+            trigger_reason="comment-command"
+          else
+            exit 0
+          fi
+
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}")"
+          head_ref="$(echo "$pr_json" | jq -r '.head.ref')"
+          base_ref="$(echo "$pr_json" | jq -r '.base.ref')"
+          body="$(echo "$pr_json" | jq -r '.body // \"\"')"
+
+          issue_number="$(echo "$head_ref" | sed -n 's|.*issue-\([0-9]\+\).*|\1|p' | head -n 1)"
+          if [ -z "$issue_number" ]; then
+            issue_number="$(printf '%s' "$body" | grep -Eio 'closes #[0-9]+' | head -n 1 | grep -Eo '[0-9]+' || true)"
+          fi
+          if [ -z "$issue_number" ]; then
+            echo "Issue番号を特定できないためスキップします。"
+            exit 0
+          fi
+
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "issue_number=${issue_number}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+          echo "base_ref=${base_ref}" >> "$GITHUB_OUTPUT"
+          echo "trigger_reason=${trigger_reason}" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch to FlowSmith
+        if: ${{ steps.ctx.outputs.pr_number != '' }}
+        env:
+          FLOW_SMITH_REPO: ${{ vars.FLOW_SMITH_REPO || 'MasaakiAYB/FlowSmith' }}
+          FLOW_SMITH_PROJECT_ID: ${{ vars.FLOW_SMITH_PROJECT_ID || '' }}
+          FLOW_SMITH_DISPATCH_SECRET: ${{ secrets.FLOW_SMITH_DISPATCH_SECRET || '' }}
+          FLOW_SMITH_DISPATCH_TOKEN: ${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          payload="$(jq -n \
+            --arg issue_number "${{ steps.ctx.outputs.issue_number }}" \
+            --arg pr_number "${{ steps.ctx.outputs.pr_number }}" \
+            --arg source_repository "${GITHUB_REPOSITORY}" \
+            --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+            --arg branch_name "${{ steps.ctx.outputs.head_ref }}" \
+            --arg base_branch "${{ steps.ctx.outputs.base_ref }}" \
+            --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
+            --arg request_id "pr-feedback-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --arg feedback_text "Triggered by: ${{ steps.ctx.outputs.trigger_reason }}" \
+            '{
+              event_type: "autonomous-agent-feedback-request",
+              client_payload: {
+                issue_number: ($issue_number | tonumber),
+                target_repo: $source_repository,
+                project_id: $project_id,
+                branch_name: $branch_name,
+                base_branch: $base_branch,
+                feedback_pr_number: ($pr_number | tonumber),
+                feedback_text: $feedback_text,
+                source_repository: $source_repository,
+                request_id: $request_id,
+                dispatch_secret: $dispatch_secret
+              }
+            }'
+          )"
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${FLOW_SMITH_DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${FLOW_SMITH_REPO}/dispatches" \
+            -d "$payload"
+```
+
+### 呼び出し側Actions実装例 3: 手動再実行（workflow_dispatch）
+
+ファイル例: `.github/workflows/flowsmith-manual-dispatch.yml`
+
+```yaml
+name: Trigger FlowSmith Manually
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "issue か feedback"
+        required: true
+        default: "issue"
+        type: choice
+        options:
+          - issue
+          - feedback
+      issue_number:
+        description: "対象Issue番号"
+        required: true
+        type: string
+      feedback_pr_number:
+        description: "feedback時のPR番号"
+        required: false
+        default: ""
+        type: string
+      branch_name:
+        description: "feedback時のhead branch"
+        required: false
+        default: ""
+        type: string
+      base_branch:
+        description: "feedback時のbase branch"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    env:
+      FLOW_SMITH_REPO: ${{ vars.FLOW_SMITH_REPO || 'MasaakiAYB/FlowSmith' }}
+      FLOW_SMITH_PROJECT_ID: ${{ vars.FLOW_SMITH_PROJECT_ID || '' }}
+    steps:
+      - name: Dispatch
+        env:
+          FLOW_SMITH_DISPATCH_TOKEN: ${{ secrets.FLOW_SMITH_DISPATCH_TOKEN }}
+          FLOW_SMITH_DISPATCH_SECRET: ${{ secrets.FLOW_SMITH_DISPATCH_SECRET || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FLOW_SMITH_DISPATCH_TOKEN:-}" ]; then
+            echo "FLOW_SMITH_DISPATCH_TOKEN が必要です。" >&2
+            exit 1
+          fi
+
+          mode="${{ inputs.mode }}"
+          payload="$(jq -n \
+            --argjson issue_number "${{ inputs.issue_number }}" \
+            --arg target_repo "${{ github.repository }}" \
+            --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+            --arg base_branch "${{ github.event.repository.default_branch }}" \
+            --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
+            --arg request_id "manual-${{ github.run_id }}-${{ github.run_attempt }}" \
+            '{
+              event_type: "autonomous-agent-issue-request",
+              client_payload: {
+                issue_number: $issue_number,
+                target_repo: $target_repo,
+                project_id: $project_id,
+                base_branch: $base_branch,
+                source_repository: $target_repo,
+                request_id: $request_id,
+                dispatch_secret: $dispatch_secret
+              }
+            }'
+          )"
+
+          if [ "$mode" = "feedback" ]; then
+            if [ -z "${{ inputs.feedback_pr_number }}" ] || [ -z "${{ inputs.branch_name }}" ] || [ -z "${{ inputs.base_branch }}" ]; then
+              echo "feedbackモードでは feedback_pr_number / branch_name / base_branch が必須です。" >&2
+              exit 1
+            fi
+            payload="$(jq -n \
+              --argjson issue_number "${{ inputs.issue_number }}" \
+              --argjson feedback_pr_number "${{ inputs.feedback_pr_number }}" \
+              --arg branch_name "${{ inputs.branch_name }}" \
+              --arg base_branch "${{ inputs.base_branch }}" \
+              --arg target_repo "${{ github.repository }}" \
+              --arg project_id "${FLOW_SMITH_PROJECT_ID}" \
+              --arg dispatch_secret "${FLOW_SMITH_DISPATCH_SECRET}" \
+              --arg request_id "manual-feedback-${{ github.run_id }}-${{ github.run_attempt }}" \
+              '{
+                event_type: "autonomous-agent-feedback-request",
+                client_payload: {
+                  issue_number: $issue_number,
+                  target_repo: $target_repo,
+                  project_id: $project_id,
+                  feedback_pr_number: $feedback_pr_number,
+                  branch_name: $branch_name,
+                  base_branch: $base_branch,
+                  source_repository: $target_repo,
+                  request_id: $request_id,
+                  dispatch_secret: $dispatch_secret
+                }
+              }'
+            )"
+          fi
+
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${FLOW_SMITH_DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${FLOW_SMITH_REPO}/dispatches" \
+            -d "$payload"
+```
+
+### ディスパッチペイロード仕様
+
+`repository_dispatch` の入口は2種類です。
+
+- Issue起点: `autonomous-agent-issue-request`
+- PRフィードバック起点: `autonomous-agent-feedback-request`
 
 共通ルール:
 
 - `issue_number` は必須（整数）
 - `project_id` または `target_repo` のどちらかは必須
-- `DISPATCH_SHARED_SECRET` を設定している場合は `dispatch_secret` が必須
+- FlowSmith側で `DISPATCH_SHARED_SECRET` を使う場合は `dispatch_secret` が必須
 
-### 1. Issue 起点
+Issue起点の禁止項目:
 
-- `event_type`: `autonomous-agent-issue-request`
-- 必須: `issue_number`
-- 任意: `project_id`, `target_repo`, `base_branch`, `branch_name`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
-- 禁止: `feedback_pr_number`, `feedback_text`
+- `feedback_pr_number`
+- `feedback_text`
 
-```bash
-curl -X POST \
-  -H "Accept: application/vnd.github+json" \
-  -H "Authorization: Bearer <FLOW_SMITH_DISPATCH_TOKEN>" \
-  https://api.github.com/repos/<owner>/FlowSmith/dispatches \
-  -d '{
-    "event_type": "autonomous-agent-issue-request",
-    "client_payload": {
-      "issue_number": 123,
-      "project_id": "sample-webapp",
-      "source_repository": "your-org/your-repo",
-      "request_id": "issue-123-run-1"
-    }
-  }'
-```
+PRフィードバック起点の必須項目:
 
-### 2. PRフィードバック起点
+- `issue_number`
+- `feedback_pr_number`
+- `branch_name`
+- `base_branch`
 
-- `event_type`: `autonomous-agent-feedback-request`
-- 必須: `issue_number`, `feedback_pr_number`, `branch_name`, `base_branch`
-- 任意: `feedback_text`, `project_id`, `target_repo`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
-- 挙動: `--allow-no-changes` を有効化し、差分ゼロの場合は成功扱い（commit/push/PR更新をスキップ）
+APIを直接叩く場合の例:
 
 ```bash
 curl -X POST \

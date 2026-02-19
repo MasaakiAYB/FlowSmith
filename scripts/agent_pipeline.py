@@ -3579,6 +3579,85 @@ def resolve_pr_number(pr_ref: str) -> str:
     return ""
 
 
+def extract_trigger_reason_from_feedback_text(feedback_text: str) -> str:
+    content = str(feedback_text or "")
+    match = re.search(r"(?im)^Triggered by:\s*(.+?)\s*$", content)
+    if not match:
+        return ""
+    return match.group(1).strip().lower()
+
+
+def is_comment_feedback_trigger(trigger_reason: str) -> bool:
+    normalized = str(trigger_reason or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"pr-comment", "review-comment", "comment-command", "review:commented"}:
+        return True
+    return (
+        normalized.startswith("pr-comment")
+        or normalized.startswith("review-comment")
+        or normalized.startswith("comment-command")
+    )
+
+
+def build_feedback_update_comment(
+    *,
+    head_commit: str,
+    ai_logs_index_url: str,
+) -> str:
+    lines = [
+        "コメントありがとうございます。ご指摘を反映して、PRを更新しました。",
+        "お手すきの際にご確認をお願いします。",
+    ]
+
+    short_sha = str(head_commit or "").strip()
+    ai_logs_url = str(ai_logs_index_url or "").strip()
+    if (short_sha and short_sha != "(no-change)") or ai_logs_url:
+        lines.append("")
+    if short_sha and short_sha != "(no-change)":
+        lines.append(f"- 更新コミット: `{short_sha[:12]}`")
+    if ai_logs_url:
+        lines.append(f"- AIログ: {ai_logs_url}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def post_pr_issue_comment(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    pr_number: str,
+    body: str,
+) -> bool:
+    normalized_repo = normalize_repo_slug(repo_slug)
+    normalized_pr = resolve_pr_number(pr_number)
+    normalized_body = str(body or "").strip()
+    if not normalized_repo or not normalized_pr or not normalized_body:
+        return False
+
+    proc = run_process(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{normalized_repo}/issues/{normalized_pr}/comments",
+            "-f",
+            f"body={normalized_body}",
+        ],
+        cwd=repo_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        log(
+            "WARNING: PRコメント投稿に失敗しました。"
+            f" repo={normalized_repo} pr={normalized_pr}"
+            + (f" detail={detail}" if detail else "")
+        )
+        return False
+    return True
+
+
 def add_labels_to_pr(
     *,
     repo_root: Path,
@@ -3662,7 +3741,7 @@ def create_or_update_pr(
     labels: list[str],
     labels_required: bool,
     draft: bool,
-) -> str:
+) -> dict[str, str]:
     body_text = read_text(body_file)
 
     # repo slug がある通常運用では REST API を優先し、GraphQL 依存を避ける。
@@ -3765,7 +3844,11 @@ def create_or_update_pr(
                 mark_pr_ready_for_review(number)
             pr_url = updated_url or str(current[0].get("url") or f"https://github.com/{repo_slug}/pull/{number}")
             log(f"Updated existing PR: {pr_url}")
-            return pr_url
+            return {
+                "url": pr_url,
+                "number": number,
+                "action": "updated",
+            }
 
         endpoint = f"repos/{repo_slug}/pulls"
         create_cmd = [
@@ -3821,7 +3904,11 @@ def create_or_update_pr(
         if not pr_url:
             pr_url = f"https://github.com/{repo_slug}/pull/{pr_ref_for_label}"
         log(f"Created PR: {pr_url}")
-        return pr_url
+        return {
+            "url": pr_url,
+            "number": str(pr_ref_for_label),
+            "action": "created",
+        }
 
     # ローカル単体実行など repo_slug が無い場合は従来の gh pr コマンドを使う。
     repo_args = ["--repo", repo_slug] if repo_slug else []
@@ -3900,7 +3987,11 @@ def create_or_update_pr(
             mark_pr_ready_for_review_legacy(number)
         pr_url = str(current[0].get("url") or "")
         log(f"Updated existing PR: {pr_url}")
-        return pr_url
+        return {
+            "url": pr_url,
+            "number": number,
+            "action": "updated",
+        }
 
     cmd = [
         "gh",
@@ -3938,7 +4029,11 @@ def create_or_update_pr(
     if not draft and created_pr_is_draft:
         mark_pr_ready_for_review_legacy(str(pr_ref_for_label))
     log(f"Created PR: {pr_url}")
-    return pr_url
+    return {
+        "url": pr_url,
+        "number": resolve_pr_number(pr_ref_for_label) or resolve_pr_number(pr_url),
+        "action": "created",
+    }
 
 
 def prepare_target_repo(
@@ -4248,6 +4343,9 @@ def main() -> int:
         "external_feedback_pr_number": 0,
         "external_feedback_pr_url": "",
         "external_feedback_item_count": 0,
+        "feedback_trigger_reason": "",
+        "feedback_update_comment_status": "skipped",
+        "feedback_update_comment_reason": "",
         "pr_change_type_checklist_markdown": (
             "- [ ] バグ修正\n"
             "- [ ] 新機能\n"
@@ -4321,6 +4419,7 @@ def main() -> int:
         "head_commit": "",
         "commit_status": "pending",
         "pr_status": "pending",
+        "pr_action": "skipped",
         "no_change_reason": "",
     }
     ui_repo_evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -4748,7 +4847,7 @@ def main() -> int:
 
             validate_required_pr_context(context)
             write_text(pr_body_file, render_template_file(pr_template, context))
-            pr_url = create_or_update_pr(
+            pr_result = create_or_update_pr(
                 repo_root=target_repo_root,
                 repo_slug=repo_slug,
                 base_branch=base_branch,
@@ -4759,7 +4858,57 @@ def main() -> int:
                 labels_required=pr_labels_required,
                 draft=pr_draft,
             )
+            pr_url = str(pr_result.get("url", "")).strip()
+            pr_number = resolve_pr_number(str(pr_result.get("number", "")).strip() or pr_url)
+            pr_action = str(pr_result.get("action", "")).strip() or "created"
+            context["pr_action"] = pr_action
             write_text(run_dir / "pr_url.txt", pr_url + "\n")
+            trigger_reason = extract_trigger_reason_from_feedback_text(
+                str(context.get("external_feedback_text", ""))
+            )
+            context["feedback_trigger_reason"] = trigger_reason
+
+            feedback_comment_status = "skipped"
+            feedback_comment_reason = ""
+            if (
+                feedback_pr_number > 0
+                and context.get("commit_status") == "committed"
+                and pr_action == "updated"
+            ):
+                if is_comment_feedback_trigger(trigger_reason):
+                    comment_body = build_feedback_update_comment(
+                        head_commit=str(context.get("head_commit", "")),
+                        ai_logs_index_url=str(context.get("ai_logs_index_url", "")),
+                    )
+                    comment_pr_number = pr_number or str(feedback_pr_number)
+                    posted = post_pr_issue_comment(
+                        repo_root=target_repo_root,
+                        repo_slug=repo_slug,
+                        pr_number=comment_pr_number,
+                        body=comment_body,
+                    )
+                    if posted:
+                        feedback_comment_status = "posted"
+                    else:
+                        feedback_comment_status = "failed"
+                        feedback_comment_reason = "PRコメントの投稿に失敗しました。"
+                else:
+                    feedback_comment_reason = (
+                        "コメント起点ではないため返信コメントを省略しました。"
+                        f" trigger={trigger_reason or 'unknown'}"
+                    )
+            context["feedback_update_comment_status"] = feedback_comment_status
+            context["feedback_update_comment_reason"] = feedback_comment_reason
+            write_text(
+                run_dir / "feedback_update_comment.md",
+                (
+                    "# Feedback Update Comment\n\n"
+                    f"- trigger_reason: `{trigger_reason or 'unknown'}`\n"
+                    f"- pr_action: `{pr_action}`\n"
+                    f"- status: `{feedback_comment_status}`\n"
+                    f"- reason: `{feedback_comment_reason or 'N/A'}`\n"
+                ),
+            )
             context["pr_status"] = "created-or-updated"
         else:
             context["pr_status"] = "skipped"
@@ -4776,6 +4925,10 @@ def main() -> int:
             f"- Commit status: `{context['commit_status']}`\n"
             f"- Commit: `{context['head_commit']}`\n"
             f"- PR status: `{context['pr_status']}`\n"
+            f"- PR action: `{context['pr_action']}`\n"
+            f"- Feedback trigger: `{context['feedback_trigger_reason'] or 'N/A'}`\n"
+            f"- Feedback update comment: `{context['feedback_update_comment_status']}`\n"
+            f"- Feedback update comment reason: `{context['feedback_update_comment_reason'] or 'N/A'}`\n"
             f"- No change reason: `{context['no_change_reason'] or 'N/A'}`\n"
             f"- Entire checkpoint: `{context['entire_checkpoint']}`\n"
             f"- Entire trace file: `{context['entire_trace_file']}`\n"
