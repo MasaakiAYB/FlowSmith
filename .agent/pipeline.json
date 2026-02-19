@@ -128,6 +128,6 @@
       "agent-task"
     ],
     "labels_required": true,
-    "draft": true
+    "draft": false
   }
 }

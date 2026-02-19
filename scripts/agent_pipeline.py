@@ -3604,6 +3604,28 @@ def create_or_update_pr(
 ) -> str:
     repo_args = ["--repo", repo_slug] if repo_slug else []
 
+    def mark_pr_ready_for_review(pr_ref: str) -> None:
+        proc = run_process(
+            ["gh", "pr", "ready", pr_ref, *repo_args],
+            cwd=repo_root,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return
+        detail = (proc.stderr or proc.stdout or "").strip()
+        lowered = detail.lower()
+        already_ready_markers = (
+            "already marked as ready for review",
+            "not in draft state",
+            "is not a draft",
+        )
+        if any(marker in lowered for marker in already_ready_markers):
+            return
+        raise RuntimeError(
+            "PR を Draft 解除できませんでした。\n"
+            + (f"detail:\n{detail}" if detail else "")
+        )
+
     def find_open_pr_by_head() -> list[dict[str, Any]]:
         existing = run_process(
             [
@@ -3616,7 +3638,7 @@ def create_or_update_pr(
                 "--state",
                 "open",
                 "--json",
-                "number,url",
+                "number,url,isDraft",
             ],
             cwd=repo_root,
             check=True,
@@ -3630,6 +3652,7 @@ def create_or_update_pr(
 
     if current:
         number = str(current[0]["number"])
+        is_draft = bool(current[0].get("isDraft", False))
         run_process(
             [
                 "gh",
@@ -3652,6 +3675,8 @@ def create_or_update_pr(
             labels=labels,
             labels_required=labels_required,
         )
+        if not draft and is_draft:
+            mark_pr_ready_for_review(number)
         pr_url = current[0]["url"]
         log(f"Updated existing PR: {pr_url}")
         return pr_url
@@ -3677,9 +3702,11 @@ def create_or_update_pr(
     pr_url = created.stdout.strip().splitlines()[-1]
     current_after_create = find_open_pr_by_head()
     pr_ref_for_label = pr_url
+    created_pr_is_draft = False
     if current_after_create:
         pr_ref_for_label = str(current_after_create[0]["number"])
         pr_url = str(current_after_create[0].get("url", pr_url))
+        created_pr_is_draft = bool(current_after_create[0].get("isDraft", False))
     add_labels_to_pr(
         repo_root=repo_root,
         repo_slug=repo_slug,
@@ -3687,6 +3714,8 @@ def create_or_update_pr(
         labels=labels,
         labels_required=labels_required,
     )
+    if not draft and created_pr_is_draft:
+        mark_pr_ready_for_review(str(pr_ref_for_label))
     log(f"Created PR: {pr_url}")
     return pr_url
 
@@ -4411,7 +4440,7 @@ def main() -> int:
             name="pr.labels",
         )
         pr_labels_required = bool(pr_conf.get("labels_required", True))
-        pr_draft = bool(pr_conf.get("draft", True))
+        pr_draft = bool(pr_conf.get("draft", False))
 
         committed_paths_raw = context.get("committed_paths", [])
         committed_paths = (
