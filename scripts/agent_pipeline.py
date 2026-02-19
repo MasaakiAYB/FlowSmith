@@ -17,6 +17,7 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 
 DEFAULT_CONFIG_PATH = Path(".agent/pipeline.json")
@@ -2829,14 +2830,45 @@ def push_branch(repo_root: Path, branch_name: str) -> None:
     git(["push", "-u", "origin", branch_name], cwd=repo_root)
 
 
+def normalize_label_list(labels: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        item = str(label).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def build_default_label_spec(label_name: str) -> tuple[str, str]:
+    specs: dict[str, tuple[str, str]] = {
+        "agent/": ("0E8A16", "FlowSmith autonomous agent PR"),
+        "agent-task": ("0E8A16", "FlowSmith autonomous agent task"),
+        "agent": ("0E8A16", "FlowSmith autonomous agent work"),
+    }
+    if label_name in specs:
+        return specs[label_name]
+    return "1D76DB", f"FlowSmith label: {label_name}"
+
+
 def resolve_repo_label_names(
     *,
     repo_root: Path,
     repo_slug: str,
 ) -> set[str]:
-    repo_args = ["--repo", repo_slug] if repo_slug else []
+    if not repo_slug:
+        return set()
     proc = run_process(
-        ["gh", "label", "list", *repo_args, "--limit", "200", "--json", "name"],
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{repo_slug}/labels",
+            "--jq",
+            ".[].name",
+        ],
         cwd=repo_root,
         check=False,
     )
@@ -2847,21 +2879,73 @@ def resolve_repo_label_names(
             + (f" detail={detail}" if detail else "")
         )
         return set()
-    try:
-        payload = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return set()
-    if not isinstance(payload, list):
-        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
-    names: set[str] = set()
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        label_name = str(item.get("name", "")).strip()
-        if label_name:
-            names.add(label_name)
-    return names
+
+def ensure_repo_label_exists(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    label_name: str,
+) -> bool:
+    if not repo_slug:
+        return False
+    color, description = build_default_label_spec(label_name)
+    create_proc = run_process(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{repo_slug}/labels",
+            "-f",
+            f"name={label_name}",
+            "-f",
+            f"color={color}",
+            "-f",
+            f"description={description}",
+        ],
+        cwd=repo_root,
+        check=False,
+    )
+    if create_proc.returncode == 0:
+        log(f"INFO: PRラベルを作成しました: `{label_name}`")
+        return True
+
+    detail = (create_proc.stderr or create_proc.stdout or "").strip()
+    lowered = detail.lower()
+    if "already_exists" in lowered or "already exists" in lowered:
+        return True
+
+    # ラベルの存在確認に失敗していたケースでも、PATCH が通るなら既存ラベルとして扱う。
+    patch_proc = run_process(
+        [
+            "gh",
+            "api",
+            "-X",
+            "PATCH",
+            f"repos/{repo_slug}/labels/{quote(label_name, safe='')}",
+            "-f",
+            f"new_name={label_name}",
+            "-f",
+            f"color={color}",
+            "-f",
+            f"description={description}",
+        ],
+        cwd=repo_root,
+        check=False,
+    )
+    if patch_proc.returncode == 0:
+        return True
+
+    patch_detail = (patch_proc.stderr or patch_proc.stdout or "").strip()
+    log(
+        "WARNING: PRラベルの作成に失敗しました。"
+        f" label={label_name}"
+        + (f" detail={detail}" if detail else "")
+        + (f" patch_detail={patch_detail}" if patch_detail else "")
+    )
+    return False
 
 
 def resolve_pr_labels_for_repo(
@@ -2870,28 +2954,23 @@ def resolve_pr_labels_for_repo(
     repo_slug: str,
     labels: list[str],
 ) -> list[str]:
-    requested: list[str] = []
-    seen_requested: set[str] = set()
-    for label in labels:
-        normalized = str(label).strip()
-        if not normalized or normalized in seen_requested:
-            continue
-        seen_requested.add(normalized)
-        requested.append(normalized)
+    requested = normalize_label_list(labels)
     if not requested:
         return []
 
     available = resolve_repo_label_names(repo_root=repo_root, repo_slug=repo_slug)
-    if not available:
-        return requested
 
     fallback_map: dict[str, list[str]] = {
         "agent/": ["agent-task", "agent"],
+        "agent-task": ["agent/", "agent"],
     }
     resolved: list[str] = []
+    seen_resolved: set[str] = set()
     for label in requested:
         if label in available:
-            resolved.append(label)
+            if label not in seen_resolved:
+                seen_resolved.add(label)
+                resolved.append(label)
             continue
 
         replacement = ""
@@ -2900,14 +2979,79 @@ def resolve_pr_labels_for_repo(
                 replacement = candidate
                 break
         if replacement:
-            if replacement not in resolved:
+            if replacement not in seen_resolved:
+                seen_resolved.add(replacement)
                 resolved.append(replacement)
             log(f"INFO: PRラベルをフォールバックします: `{label}` -> `{replacement}`")
+            continue
+
+        if ensure_repo_label_exists(
+            repo_root=repo_root,
+            repo_slug=repo_slug,
+            label_name=label,
+        ):
+            available.add(label)
+            if label not in seen_resolved:
+                seen_resolved.add(label)
+                resolved.append(label)
+            continue
+
+        created_replacement = ""
+        for candidate in fallback_map.get(label, []):
+            if ensure_repo_label_exists(
+                repo_root=repo_root,
+                repo_slug=repo_slug,
+                label_name=candidate,
+            ):
+                created_replacement = candidate
+                break
+        if created_replacement:
+            available.add(created_replacement)
+            if created_replacement not in seen_resolved:
+                seen_resolved.add(created_replacement)
+                resolved.append(created_replacement)
+            log(
+                "INFO: PRラベルをフォールバック作成しました: "
+                f"`{label}` -> `{created_replacement}`"
+            )
             continue
 
         log(f"WARNING: PRラベルが見つからないためスキップします: `{label}`")
 
     return resolved
+
+
+def fetch_pr_label_names(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    pr_ref: str,
+) -> set[str]:
+    repo_args = ["--repo", repo_slug] if repo_slug else []
+    proc = run_process(
+        [
+            "gh",
+            "pr",
+            "view",
+            pr_ref,
+            *repo_args,
+            "--json",
+            "labels",
+            "--jq",
+            ".labels[].name",
+        ],
+        cwd=repo_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        log(
+            "WARNING: PRラベル一覧の取得に失敗しました。"
+            f" pr={pr_ref}"
+            + (f" detail={detail}" if detail else "")
+        )
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
 def add_labels_to_pr(
@@ -2916,13 +3060,23 @@ def add_labels_to_pr(
     repo_slug: str,
     pr_ref: str,
     labels: list[str],
+    labels_required: bool,
 ) -> None:
+    requested_labels = normalize_label_list(labels)
+    if not requested_labels:
+        return
+
     repo_args = ["--repo", repo_slug] if repo_slug else []
     resolved_labels = resolve_pr_labels_for_repo(
         repo_root=repo_root,
         repo_slug=repo_slug,
-        labels=labels,
+        labels=requested_labels,
     )
+    if not resolved_labels:
+        if labels_required:
+            raise RuntimeError("PRラベルの解決に失敗しました。requested=" + ", ".join(requested_labels))
+        return
+
     for normalized in resolved_labels:
         proc = run_process(
             ["gh", "pr", "edit", pr_ref, *repo_args, "--add-label", normalized],
@@ -2937,6 +3091,18 @@ def add_labels_to_pr(
                 + (f" detail={detail}" if detail else "")
             )
 
+    current_labels = fetch_pr_label_names(
+        repo_root=repo_root,
+        repo_slug=repo_slug,
+        pr_ref=pr_ref,
+    )
+    applied = [label for label in resolved_labels if label in current_labels]
+    if labels_required and not applied:
+        raise RuntimeError(
+            "PRラベルの付与に失敗しました。"
+            f" requested={requested_labels} resolved={resolved_labels}"
+        )
+
 
 def create_or_update_pr(
     *,
@@ -2947,6 +3113,7 @@ def create_or_update_pr(
     title: str,
     body_file: Path,
     labels: list[str],
+    labels_required: bool,
     draft: bool,
 ) -> str:
     repo_args = ["--repo", repo_slug] if repo_slug else []
@@ -2997,6 +3164,7 @@ def create_or_update_pr(
             repo_slug=repo_slug,
             pr_ref=number,
             labels=labels,
+            labels_required=labels_required,
         )
         pr_url = current[0]["url"]
         log(f"Updated existing PR: {pr_url}")
@@ -3031,6 +3199,7 @@ def create_or_update_pr(
         repo_slug=repo_slug,
         pr_ref=pr_ref_for_label,
         labels=labels,
+        labels_required=labels_required,
     )
     log(f"Created PR: {pr_url}")
     return pr_url
@@ -3675,6 +3844,7 @@ def main() -> int:
             default=[],
             name="pr.labels",
         )
+        pr_labels_required = bool(pr_conf.get("labels_required", True))
         pr_draft = bool(pr_conf.get("draft", True))
 
         validate_required_pr_context(context)
@@ -3687,6 +3857,7 @@ def main() -> int:
             title=pr_title,
             body_file=pr_body_file,
             labels=pr_labels,
+            labels_required=pr_labels_required,
             draft=pr_draft,
         )
         write_text(run_dir / "pr_url.txt", pr_url + "\n")

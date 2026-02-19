@@ -119,7 +119,7 @@ PR本文で直接プレビューできるURLを埋め込みます。
 
 - PRタイトルは `issue_title` から装飾プレフィックス（例: `[エージェント作業]`）を除去して自動整形します。
 - `feat:` / `fix:` など Conventional 形式が未指定の場合は、Issueタイトル/ラベルから推定した種別を付与します（既定は `feat:`）。
-- エージェントPRには `agent/` ラベルを付与します（付与失敗時は警告ログのみで続行）。
+- エージェントPRには `agent/` 系ラベルを必ず付与します（既定で `pr.labels_required=true`。付与できない場合はジョブ失敗）。
 - PR本文は OJPP の構成に合わせ、`変更内容 / 関連 Issue / 変更の種類 / チェックリスト / スクリーンショット / AIエージェント実行ログ` を出力します。
 
 ## 実行モード
@@ -179,12 +179,13 @@ python scripts/agent_pipeline.py \
 
 1. `actions/setup-python@v5` で Python 3.12 をセットアップ
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ
-3. `npm install -g @openai/codex` で `codex` CLI をインストール（既存ならスキップ）
-4. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
-5. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
-6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
-7. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
-8. 実行後、`.agent/runs/...` を `agent-run-<run_id>-<run_attempt>` artifact として保存（UI証跡を含む）
+3. `fonts-noto-cjk` / `fonts-ipafont-*` を導入して日本語フォントをセットアップ（UI証跡の文字化け防止）
+4. `npm install -g @openai/codex` で `codex` CLI をインストール（既存ならスキップ）
+5. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
+6. `AGENT_SETUP_SCRIPT` が設定されていれば実行（例: `uv` / `pnpm` / 独自CLIの導入）
+7. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` の実行コマンド存在を事前検証
+8. `Entire CLI` をインストールしてから `scripts/agent_pipeline.py` を起動
+9. 実行後、`.agent/runs/...` を `agent-run-<run_id>-<run_attempt>` artifact として保存（UI証跡を含む）
 
 `CODEX_AUTH_JSON_B64` は検証用途の暫定手段です。安定運用は `OPENAI_API_KEY` の利用を推奨します。
 

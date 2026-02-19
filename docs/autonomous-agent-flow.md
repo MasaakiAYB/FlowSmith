@@ -13,7 +13,7 @@
 9. `run_dir` の実行ログを `ai-logs/issue-<番号>-<timestamp>/` に保存し、専用ブランチ（既定: `agent-ai-logs`）へ集約する
 10. 変更を `agent/<project>-issue-...` ブランチにコミットし、`push` する
 11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
-12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` ラベル付与を試行したうえで PR を作成または更新する
+12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
 13. 人間レビューでマージ可否を判断する
 
 ## 外部呼び出し受け口（ディスパッチ）
@@ -137,11 +137,12 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 
 1. `actions/setup-python@v5` で Python 3.12 をセットアップ
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ
-3. `npm install -g @openai/codex` で `codex` CLI を導入（既存なら再インストールしない）
-4. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
-5. `AGENT_SETUP_SCRIPT` が設定されていれば実行
-6. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
-7. `FLOWSMITH_ENABLE_ENTIRE=true` のときのみ `Entire CLI` をインストール
+3. `fonts-noto-cjk` / `fonts-ipafont-*` を導入して日本語フォントをセットアップ（UI証跡の文字化け防止）
+4. `npm install -g @openai/codex` で `codex` CLI を導入（既存なら再インストールしない）
+5. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
+6. `AGENT_SETUP_SCRIPT` が設定されていれば実行
+7. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
+8. `FLOWSMITH_ENABLE_ENTIRE=true` のときのみ `Entire CLI` をインストール
 
 関連 Secrets:
 

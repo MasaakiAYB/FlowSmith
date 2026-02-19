@@ -27,7 +27,8 @@
       "labels": [
         "agent/",
         "agent-task"
-      ]
+      ],
+      "labels_required": true
     }
   },
   "entire": {
@@ -126,6 +127,7 @@
       "agent/",
       "agent-task"
     ],
+    "labels_required": true,
     "draft": true
   }
 }
