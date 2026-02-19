@@ -13,6 +13,9 @@ Issue メタデータ:
 Issue 本文:
 {issue_body}
 
+追加フィードバック（PRレビュー/コメント）:
+{external_feedback_markdown}
+
 出力要件:
 1. スコープ（対象/対象外）
 2. 実装手順（番号付き、各手順に完了条件を付与）

@@ -1248,6 +1248,306 @@ def load_issue_from_gh(issue_number: int, *, repo_slug: str, cwd: Path) -> dict[
     }
 
 
+def gh_api_json(*, endpoint: str, cwd: Path) -> Any:
+    proc = run_process(
+        ["gh", "api", endpoint],
+        cwd=cwd,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(
+            f"GitHub API call failed: {endpoint}\n"
+            + (f"detail:\n{detail}" if detail else "")
+        )
+    try:
+        return json.loads(proc.stdout or "null")
+    except json.JSONDecodeError as err:
+        raise RuntimeError(f"GitHub API returned invalid JSON: {endpoint}") from err
+
+
+def is_bot_login(login: str) -> bool:
+    normalized = str(login or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized.endswith("[bot]"):
+        return True
+    if normalized in {"github-actions", "github-actions[bot]", "dependabot[bot]"}:
+        return True
+    return False
+
+
+def is_agent_command_comment(text: str) -> bool:
+    normalized = normalize_inline_text(text).lower()
+    if not normalized:
+        return True
+    return bool(re.fullmatch(r"/agent(?:\s+[a-z0-9_-]+)?", normalized))
+
+
+def build_pr_feedback_digest(
+    *,
+    repo_root: Path,
+    repo_slug: str,
+    pr_number: int,
+    max_items: int,
+    max_chars_per_item: int = 500,
+) -> dict[str, Any]:
+    if not repo_slug:
+        raise RuntimeError("PRフィードバック抽出には target repo slug が必要です。")
+    if pr_number <= 0:
+        raise RuntimeError("feedback_pr_number must be a positive integer.")
+
+    pull_payload = gh_api_json(
+        endpoint=f"repos/{repo_slug}/pulls/{pr_number}",
+        cwd=repo_root,
+    )
+    if not isinstance(pull_payload, dict):
+        raise RuntimeError("PR情報の取得結果が不正です。")
+    pr_url = str(pull_payload.get("html_url", "")).strip()
+
+    reviews_payload = gh_api_json(
+        endpoint=f"repos/{repo_slug}/pulls/{pr_number}/reviews?per_page=100",
+        cwd=repo_root,
+    )
+    comments_payload = gh_api_json(
+        endpoint=f"repos/{repo_slug}/pulls/{pr_number}/comments?per_page=100",
+        cwd=repo_root,
+    )
+    issue_comments_payload = gh_api_json(
+        endpoint=f"repos/{repo_slug}/issues/{pr_number}/comments?per_page=100",
+        cwd=repo_root,
+    )
+
+    reviews = reviews_payload if isinstance(reviews_payload, list) else []
+    review_comments = comments_payload if isinstance(comments_payload, list) else []
+    issue_comments = issue_comments_payload if isinstance(issue_comments_payload, list) else []
+
+    items: list[dict[str, Any]] = []
+
+    def add_item(
+        *,
+        source: str,
+        text: str,
+        author: str,
+        url: str,
+        created_at: str,
+        priority: int,
+    ) -> None:
+        normalized_text = normalize_inline_text(text)
+        if not normalized_text or is_agent_command_comment(normalized_text):
+            return
+        if is_bot_login(author):
+            return
+        items.append(
+            {
+                "source": source,
+                "text": clip_inline_text(normalized_text, max_chars=max_chars_per_item),
+                "author": str(author).strip(),
+                "url": str(url).strip(),
+                "created_at": str(created_at).strip(),
+                "priority": priority,
+            }
+        )
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        state = str(review.get("state", "")).strip().upper()
+        if state not in {"CHANGES_REQUESTED", "COMMENTED"}:
+            continue
+        user = review.get("user", {})
+        author = str(user.get("login", "")).strip() if isinstance(user, dict) else ""
+        priority = 100 if state == "CHANGES_REQUESTED" else 60
+        add_item(
+            source=f"review:{state.lower()}",
+            text=str(review.get("body") or ""),
+            author=author,
+            url=str(review.get("html_url") or ""),
+            created_at=str(review.get("submitted_at") or review.get("created_at") or ""),
+            priority=priority,
+        )
+
+    for comment in review_comments:
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user", {})
+        author = str(user.get("login", "")).strip() if isinstance(user, dict) else ""
+        path = str(comment.get("path") or "").strip()
+        line = comment.get("line")
+        location = path
+        if isinstance(line, int):
+            location = f"{path}:{line}" if path else str(line)
+        source = "review-comment"
+        if location:
+            source = f"{source}:{location}"
+        add_item(
+            source=source,
+            text=str(comment.get("body") or ""),
+            author=author,
+            url=str(comment.get("html_url") or ""),
+            created_at=str(comment.get("created_at") or ""),
+            priority=90,
+        )
+
+    for comment in issue_comments:
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user", {})
+        author = str(user.get("login", "")).strip() if isinstance(user, dict) else ""
+        add_item(
+            source="pr-comment",
+            text=str(comment.get("body") or ""),
+            author=author,
+            url=str(comment.get("html_url") or ""),
+            created_at=str(comment.get("created_at") or ""),
+            priority=70,
+        )
+
+    sorted_items = sorted(
+        items,
+        key=lambda item: (-int(item.get("priority", 0)), str(item.get("created_at", ""))),
+    )
+    unique_items: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+    for item in sorted_items:
+        dedupe_key = normalize_inline_text(str(item.get("text", "")).lower())
+        if not dedupe_key or dedupe_key in seen_texts:
+            continue
+        seen_texts.add(dedupe_key)
+        unique_items.append(item)
+        if len(unique_items) >= max_items:
+            break
+
+    if not unique_items:
+        markdown = (
+            "## PRレビュー指摘（自動抽出）\n\n"
+            f"- PR: {pr_url or f'https://github.com/{repo_slug}/pull/{pr_number}'}\n"
+            "- 抽出件数: `0`\n"
+            "- 有効な改善指摘は見つかりませんでした。\n"
+        )
+        return {
+            "count": 0,
+            "url": pr_url,
+            "markdown": markdown,
+            "text": "",
+        }
+
+    lines = [
+        "## PRレビュー指摘（自動抽出）",
+        "",
+        f"- PR: {pr_url or f'https://github.com/{repo_slug}/pull/{pr_number}'}",
+        f"- 抽出件数: `{len(unique_items)}`",
+        "",
+    ]
+    text_lines: list[str] = []
+    for idx, item in enumerate(unique_items, start=1):
+        source = str(item.get("source", "feedback")).strip()
+        author = str(item.get("author", "")).strip() or "unknown"
+        text = str(item.get("text", "")).strip()
+        url = str(item.get("url", "")).strip()
+        lines.append(f"{idx}. `[{source}] @{author}` {text}")
+        if url:
+            lines.append(f"   - 参照: {url}")
+        text_lines.append(f"- [{source}] {text}")
+
+    markdown = "\n".join(lines).strip() + "\n"
+    text = "\n".join(text_lines).strip()
+    return {
+        "count": len(unique_items),
+        "url": pr_url,
+        "markdown": markdown,
+        "text": text,
+    }
+
+
+def load_feedback_text(
+    *,
+    control_root: Path,
+    run_dir: Path,
+    repo_root: Path,
+    repo_slug: str,
+    feedback_file: Path | None,
+    feedback_text: str,
+    feedback_pr_number: int,
+    feedback_max_items: int,
+) -> dict[str, Any]:
+    parts: list[str] = []
+    sections: list[str] = []
+    feedback_source_lines: list[str] = []
+    pr_url = ""
+    feedback_count = 0
+
+    direct_text = str(feedback_text or "").strip()
+    if direct_text:
+        normalized = clip_text(direct_text, max_chars=8000).strip()
+        parts.append(normalized)
+        sections.append("## 追加フィードバック（外部指定）\n\n" + normalized)
+        feedback_source_lines.append("- source: `feedback_text`")
+
+    if feedback_file:
+        resolved_feedback_file = resolve_path(feedback_file, base_dir=control_root)
+        if not resolved_feedback_file.exists():
+            raise RuntimeError(f"feedback file not found: {resolved_feedback_file}")
+        loaded = read_text(resolved_feedback_file).strip()
+        if loaded:
+            normalized = clip_text(loaded, max_chars=8000).strip()
+            parts.append(normalized)
+            sections.append(
+                "## 追加フィードバック（feedback_file）\n\n"
+                f"- file: `{resolved_feedback_file}`\n\n{normalized}"
+            )
+            feedback_source_lines.append(f"- source: `feedback_file` ({resolved_feedback_file})")
+
+    if feedback_pr_number > 0:
+        digest = build_pr_feedback_digest(
+            repo_root=repo_root,
+            repo_slug=repo_slug,
+            pr_number=feedback_pr_number,
+            max_items=feedback_max_items,
+        )
+        pr_url = str(digest.get("url", "")).strip()
+        feedback_count = int(digest.get("count", 0))
+        markdown = str(digest.get("markdown", "")).strip()
+        text = str(digest.get("text", "")).strip()
+
+        write_text(run_dir / "external_feedback_pr.md", markdown + ("\n" if markdown else ""))
+        if text:
+            parts.append(clip_text(text, max_chars=8000).strip())
+            sections.append(markdown)
+        feedback_source_lines.append(
+            f"- source: `pr_feedback` (pr=#{feedback_pr_number}, items={feedback_count})"
+        )
+
+    merged_text = "\n".join(item for item in parts if item).strip()
+    merged_markdown = "\n\n".join(section for section in sections if section).strip()
+    if not merged_markdown:
+        merged_markdown = "_追加フィードバックなし_"
+    if not feedback_source_lines:
+        feedback_source_lines.append("- source: `(none)`")
+
+    write_text(
+        run_dir / "external_feedback_status.md",
+        "\n".join(
+            [
+                "# External Feedback",
+                "",
+                *feedback_source_lines,
+                f"- merged_length: `{len(merged_text)}`",
+                f"- pr_feedback_url: `{pr_url or 'none'}`",
+            ]
+        )
+        + "\n",
+    )
+
+    return {
+        "external_feedback_text": merged_text,
+        "external_feedback_markdown": merged_markdown,
+        "external_feedback_pr_number": feedback_pr_number if feedback_pr_number > 0 else 0,
+        "external_feedback_pr_url": pr_url,
+        "external_feedback_item_count": feedback_count,
+    }
+
+
 def resolve_command(raw: str, *, required: bool) -> str:
     value = (raw or "").strip()
     if not value:
@@ -3550,6 +3850,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run autonomous issue-to-PR pipeline.")
     parser.add_argument("--issue-number", type=int, required=True)
     parser.add_argument("--issue-file", type=Path, default=None)
+    parser.add_argument(
+        "--feedback-pr-number",
+        type=int,
+        default=0,
+        help="Optional: PR number to extract actionable feedback from",
+    )
+    parser.add_argument(
+        "--feedback-max-items",
+        type=int,
+        default=20,
+        help="Maximum actionable feedback items to import from PR comments/reviews",
+    )
+    parser.add_argument(
+        "--feedback-file",
+        type=Path,
+        default=None,
+        help="Optional markdown/text file with additional feedback",
+    )
+    parser.add_argument(
+        "--feedback-text",
+        default="",
+        help="Optional direct feedback text",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--project", default=None, help="Project id in projects manifest")
     parser.add_argument("--projects-file", type=Path, default=DEFAULT_PROJECTS_PATH)
@@ -3649,6 +3972,11 @@ def main() -> int:
         "instruction_markdown": "",
         "validation_commands_markdown": "",
         "log_location_markdown": "",
+        "external_feedback_markdown": "_追加フィードバックなし_",
+        "external_feedback_text": "",
+        "external_feedback_pr_number": 0,
+        "external_feedback_pr_url": "",
+        "external_feedback_item_count": 0,
         "pr_change_type_checklist_markdown": (
             "- [ ] バグ修正\n"
             "- [ ] 新機能\n"
@@ -3737,6 +4065,22 @@ def main() -> int:
     )
     context["validation_commands_markdown"] = render_validation_commands_markdown(quality_gates)
     context["log_location_markdown"] = render_log_location_markdown(context)
+    context.update(
+        load_feedback_text(
+            control_root=control_root,
+            run_dir=run_dir,
+            repo_root=target_repo_root,
+            repo_slug=repo_slug,
+            feedback_file=args.feedback_file,
+            feedback_text=str(args.feedback_text or ""),
+            feedback_pr_number=max(int(args.feedback_pr_number or 0), 0),
+            feedback_max_items=parse_positive_int(
+                args.feedback_max_items,
+                default=20,
+                name="feedback_max_items",
+            ),
+        )
+    )
 
     write_text(
         task_file,
@@ -3746,7 +4090,8 @@ def main() -> int:
             f"Target repo: {repo_slug or '(inferred from local git)'}\n"
             f"Target path: {target_repo_root}\n"
             f"URL: {issue['url'] or '(local file)'}\n\n"
-            f"## Body\n\n{issue['body']}\n"
+            f"## Body\n\n{issue['body']}\n\n"
+            f"## External Feedback\n\n{context['external_feedback_markdown']}\n"
         ),
     )
 
@@ -3798,7 +4143,11 @@ def main() -> int:
     context["plan_markdown"] = read_text(plan_file)
 
     last_validation = ""
-    feedback = "None"
+    external_feedback_text = clip_text(
+        str(context.get("external_feedback_text", "")).strip(),
+        max_chars=6000,
+    ).strip()
+    feedback = external_feedback_text or "None"
     success = False
 
     for attempt in range(1, max_attempts + 1):
@@ -3836,11 +4185,22 @@ def main() -> int:
             success = True
             break
 
-        feedback = (
+        quality_feedback = (
             "Quality gates failed on previous attempt.\n\n"
             f"{summary}\n\n"
             "Fix the failing points and retry."
         )
+        if external_feedback_text:
+            feedback = clip_text(
+                (
+                    "PRレビュー/コメントの指摘（継続対応）:\n\n"
+                    f"{external_feedback_text}\n\n"
+                    f"{quality_feedback}"
+                ),
+                max_chars=8000,
+            )
+        else:
+            feedback = quality_feedback
 
     if not success:
         raise RuntimeError(

@@ -14,6 +14,9 @@ Issue:
 Issue 本文:
 {issue_body}
 
+追加フィードバック（PRレビュー/コメント）:
+{external_feedback_markdown}
+
 計画:
 {plan_markdown}
 

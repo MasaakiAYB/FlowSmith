@@ -8,6 +8,9 @@ Issue:
 - 番号: #{issue_number}
 - タイトル: {issue_title}
 
+追加フィードバック（PRレビュー/コメント）:
+{external_feedback_markdown}
+
 計画:
 {plan_markdown}
 

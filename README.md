@@ -204,6 +204,8 @@ python scripts/agent_pipeline.py \
 - `target_repo`（任意。`project_id` 未指定時は必須）
 - `base_branch`（任意）
 - `branch_name`（任意）
+- `feedback_pr_number`（任意。対象リポジトリのPR番号。指定時はPRレビュー/コメントを自動抽出）
+- `feedback_text`（任意。追加で与える改善指摘テキスト）
 - `no_sync`（任意、`true|false`）
 - `source_repository`（任意、呼び出し元メタデータ）
 - `request_id`（任意、リクエスト識別子）
@@ -226,6 +228,20 @@ curl -X POST \
     }
   }'
 ```
+
+## PRレビュー指摘の自動再実行
+
+`scripts/agent_pipeline.py` は次の入力を受け取ると、PRレビュー/コメントの改善指摘を収集して再実装に反映します。
+
+- `--feedback-pr-number <PR番号>`: 対象PRから `changes_requested` / レビューコメント / PRコメントを自動抽出
+- `--feedback-file <path>` または `--feedback-text <text>`: 手動で改善指摘を追加
+
+抽出した内容は `run_dir/external_feedback_pr.md` と `external_feedback_status.md` に保存され、
+Planner/Coder/Reviewer プロンプトへ反映されます。
+
+呼び出し側リポジトリでの自動トリガー例:
+
+- `docs/examples/trigger-flowsmith-on-pr-feedback.yml`
 
 ## 運用ガードレール
 

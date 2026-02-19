@@ -15,6 +15,7 @@
 11. `.agent/templates/pr_body.md` から PR 本文を生成する（OJPP準拠の章立て + 指示内容/検証コマンド/ログの場所を必須出力）
 12. PRタイトルを装飾プレフィックス除去 + Conventional形式で自動整形し、`agent/` 系ラベルを付与したうえで PR を作成または更新する（付与できない場合は失敗）
 13. 人間レビューでマージ可否を判断する
+14. `feedback_pr_number` 指定時はPRレビュー/コメントを抽出して次回の Planner/Coder/Reviewer 入力へ反映する
 
 ## 外部呼び出し受け口（ディスパッチ）
 
@@ -43,9 +44,15 @@
 
 - `base_branch`
 - `branch_name`
+- `feedback_pr_number`（対象リポジトリのPR番号。指定時は改善指摘を自動抽出）
+- `feedback_text`（追加で与える改善指摘テキスト）
 - `no_sync`
 - `source_repository`（呼び出し元メタデータ）
 - `request_id`（リクエスト識別子）
+
+呼び出し側（対象リポジトリ）でのPRレビュー起点の自動再実行例:
+
+- `docs/examples/trigger-flowsmith-on-pr-feedback.yml`
 
 ## マルチプロジェクト設定
 

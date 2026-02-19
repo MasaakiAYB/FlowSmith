@@ -23,6 +23,9 @@
 
 {related_issue_markdown}
 
+## レビュー指摘（自動抽出）
+{external_feedback_markdown}
+
 ## スクリーンショット（UI変更時）
 
 - UI証跡状態: `{ui_evidence_status}`
