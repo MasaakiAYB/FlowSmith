@@ -19,6 +19,15 @@ from typing import Any
 
 
 OPERATION_LOG_MARKER = "flowsmith-operation-log"
+DEFAULT_LOCK_LABEL = "agent/running"
+DEFAULT_SERVICE_LABEL_PREFIX = "agent/service:"
+DEFAULT_OPERATION_LABEL_PREFIX = "agent/op:"
+DEFAULT_MAX_PARALLEL = 2
+DEFAULT_POLL_SECONDS = 20
+DEFAULT_TIMEOUT_MINUTES = 180
+DEFAULT_STALE_MINUTES = 360
+DEFAULT_COOLDOWN_MINUTES = 30
+DEFAULT_LIST_LIMIT = 100
 
 
 def log(message: str) -> None:
@@ -73,6 +82,29 @@ def load_json_stdout(proc: subprocess.CompletedProcess[str], *, where: str) -> A
         raise RuntimeError(f"Invalid JSON from {where}") from err
 
 
+def normalize_repo_and_issue(repo_value: str, issue_value: int) -> tuple[str, int]:
+    repo = str(repo_value or "").strip()
+    issue_number = int(issue_value)
+    if not repo:
+        raise RuntimeError("repo is required.")
+    if issue_number <= 0:
+        raise RuntimeError("issue-number must be positive.")
+    return repo, issue_number
+
+
+def parse_label_names(labels_raw: Any) -> set[str]:
+    if not isinstance(labels_raw, list):
+        return set()
+    labels: set[str] = set()
+    for item in labels_raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            labels.add(name)
+    return labels
+
+
 def ensure_label_exists(repo: str, label: str) -> None:
     if not label:
         raise RuntimeError("Label name is empty.")
@@ -105,6 +137,17 @@ class IssueInfo:
     labels: set[str]
 
 
+def parse_issue_info(payload: Any) -> IssueInfo | None:
+    if not isinstance(payload, dict):
+        return None
+    number = int(payload.get("number") or 0)
+    if number <= 0:
+        return None
+    updated_at = parse_time(str(payload.get("updatedAt") or ""))
+    labels = parse_label_names(payload.get("labels"))
+    return IssueInfo(number=number, updated_at=updated_at, labels=labels)
+
+
 def get_issue(repo: str, issue_number: int) -> IssueInfo:
     proc = run_gh(
         [
@@ -118,22 +161,18 @@ def get_issue(repo: str, issue_number: int) -> IssueInfo:
         ]
     )
     payload = load_json_stdout(proc, where="gh issue view")
-    if not isinstance(payload, dict):
+    issue = parse_issue_info(payload)
+    if issue is None:
         raise RuntimeError("Issue payload is invalid.")
-    number = int(payload.get("number") or 0)
-    updated_at = parse_time(str(payload.get("updatedAt") or ""))
-    labels_raw = payload.get("labels") if isinstance(payload.get("labels"), list) else []
-    labels: set[str] = set()
-    for item in labels_raw:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if name:
-            labels.add(name)
-    return IssueInfo(number=number, updated_at=updated_at, labels=labels)
+    return issue
 
 
-def list_open_issues_with_label(repo: str, label: str, *, limit: int = 100) -> list[IssueInfo]:
+def list_open_issues_with_label(
+    repo: str,
+    label: str,
+    *,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> list[IssueInfo]:
     proc = run_gh(
         [
             "issue",
@@ -155,21 +194,9 @@ def list_open_issues_with_label(repo: str, label: str, *, limit: int = 100) -> l
         return []
     issues: list[IssueInfo] = []
     for item in payload:
-        if not isinstance(item, dict):
-            continue
-        number = int(item.get("number") or 0)
-        if number <= 0:
-            continue
-        updated_at = parse_time(str(item.get("updatedAt") or ""))
-        labels_raw = item.get("labels") if isinstance(item.get("labels"), list) else []
-        labels: set[str] = set()
-        for label_item in labels_raw:
-            if not isinstance(label_item, dict):
-                continue
-            name = str(label_item.get("name") or "").strip()
-            if name:
-                labels.add(name)
-        issues.append(IssueInfo(number=number, updated_at=updated_at, labels=labels))
+        parsed = parse_issue_info(item)
+        if parsed is not None:
+            issues.append(parsed)
     return issues
 
 
@@ -254,7 +281,7 @@ def list_issue_numbers_for_labels(
     *,
     repo: str,
     labels: list[str],
-    limit: int = 100,
+    limit: int = DEFAULT_LIST_LIMIT,
 ) -> list[int]:
     cmd = [
         "issue",
@@ -339,6 +366,38 @@ def find_latest_operation_timestamp(
     return latest
 
 
+def calculate_cooldown_wait_seconds(
+    *,
+    cooldown_minutes: int,
+    last_executed_at: dt.datetime | None,
+) -> int:
+    if cooldown_minutes <= 0 or last_executed_at is None:
+        return 0
+    cooldown_deadline = last_executed_at + dt.timedelta(minutes=cooldown_minutes)
+    now = dt.datetime.now(dt.timezone.utc)
+    if now >= cooldown_deadline:
+        return 0
+    return int((cooldown_deadline - now).total_seconds())
+
+
+def build_wait_reason_text(
+    *,
+    issue_locked: bool,
+    lock_label: str,
+    running_count: int,
+    max_parallel: int,
+    cooldown_wait_seconds: int,
+) -> str:
+    reasons: list[str] = []
+    if issue_locked:
+        reasons.append(f"issue is locked ({lock_label})")
+    if running_count >= max_parallel:
+        reasons.append(f"repo parallel limit reached ({running_count}/{max_parallel})")
+    if cooldown_wait_seconds > 0:
+        reasons.append(f"operation cooldown active ({cooldown_wait_seconds}s)")
+    return ", ".join(reasons) or "unknown"
+
+
 def write_outputs(outputs: dict[str, str], github_output: str) -> None:
     if not github_output:
         return
@@ -350,21 +409,16 @@ def write_outputs(outputs: dict[str, str], github_output: str) -> None:
 
 
 def acquire_lock(args: argparse.Namespace) -> int:
-    repo = str(args.repo).strip()
-    issue_number = int(args.issue_number)
-    if not repo:
-        raise RuntimeError("repo is required.")
-    if issue_number <= 0:
-        raise RuntimeError("issue-number must be positive.")
+    repo, issue_number = normalize_repo_and_issue(args.repo, args.issue_number)
 
-    lock_label = str(args.lock_label).strip() or "agent/running"
+    lock_label = str(args.lock_label).strip() or DEFAULT_LOCK_LABEL
     max_parallel = max(int(args.max_parallel), 1)
     poll_seconds = max(int(args.poll_seconds), 5)
     timeout_minutes = max(int(args.timeout_minutes), 1)
     stale_minutes = max(int(args.stale_minutes), 0)
     cooldown_minutes = max(int(args.cooldown_minutes), 0)
-    service_prefix = str(args.service_label_prefix).strip() or "agent/service:"
-    operation_prefix = str(args.operation_label_prefix).strip() or "agent/op:"
+    service_prefix = str(args.service_label_prefix).strip() or DEFAULT_SERVICE_LABEL_PREFIX
+    operation_prefix = str(args.operation_label_prefix).strip() or DEFAULT_OPERATION_LABEL_PREFIX
 
     ensure_label_exists(repo, lock_label)
 
@@ -394,11 +448,10 @@ def acquire_lock(args: argparse.Namespace) -> int:
                 service_label=service_label,
                 operation_label=operation_label,
             )
-            if last_executed_at is not None:
-                cooldown_deadline = last_executed_at + dt.timedelta(minutes=cooldown_minutes)
-                now = dt.datetime.now(dt.timezone.utc)
-                if now < cooldown_deadline:
-                    cooldown_wait_seconds = int((cooldown_deadline - now).total_seconds())
+            cooldown_wait_seconds = calculate_cooldown_wait_seconds(
+                cooldown_minutes=cooldown_minutes,
+                last_executed_at=last_executed_at,
+            )
 
         if not issue_locked and running_count < max_parallel and cooldown_wait_seconds <= 0:
             log(
@@ -431,27 +484,21 @@ def acquire_lock(args: argparse.Namespace) -> int:
                 f"repo={repo} issue=#{issue_number} lock_label={lock_label}"
             )
 
-        reasons: list[str] = []
-        if issue_locked:
-            reasons.append(f"issue is locked ({lock_label})")
-        if running_count >= max_parallel:
-            reasons.append(f"repo parallel limit reached ({running_count}/{max_parallel})")
-        if cooldown_wait_seconds > 0:
-            reasons.append(f"operation cooldown active ({cooldown_wait_seconds}s)")
-        reason_text = ", ".join(reasons) or "unknown"
+        reason_text = build_wait_reason_text(
+            issue_locked=issue_locked,
+            lock_label=lock_label,
+            running_count=running_count,
+            max_parallel=max_parallel,
+            cooldown_wait_seconds=cooldown_wait_seconds,
+        )
         log(f"Waiting for lock: {reason_text}")
         time.sleep(poll_seconds)
 
 
 def release_lock(args: argparse.Namespace) -> int:
-    repo = str(args.repo).strip()
-    issue_number = int(args.issue_number)
-    if not repo:
-        raise RuntimeError("repo is required.")
-    if issue_number <= 0:
-        raise RuntimeError("issue-number must be positive.")
+    repo, issue_number = normalize_repo_and_issue(args.repo, args.issue_number)
 
-    lock_label = str(args.lock_label).strip() or "agent/running"
+    lock_label = str(args.lock_label).strip() or DEFAULT_LOCK_LABEL
     remove_issue_label(repo, issue_number, lock_label)
     log(f"Released lock label {lock_label} on {repo}#{issue_number}")
 
@@ -490,20 +537,20 @@ def build_parser() -> argparse.ArgumentParser:
     acquire = subparsers.add_parser("acquire", help="Acquire issue lock with queue semantics")
     acquire.add_argument("--repo", required=True)
     acquire.add_argument("--issue-number", required=True, type=int)
-    acquire.add_argument("--lock-label", default="agent/running")
-    acquire.add_argument("--max-parallel", default=2, type=int)
-    acquire.add_argument("--poll-seconds", default=20, type=int)
-    acquire.add_argument("--timeout-minutes", default=180, type=int)
-    acquire.add_argument("--stale-minutes", default=360, type=int)
-    acquire.add_argument("--cooldown-minutes", default=30, type=int)
-    acquire.add_argument("--service-label-prefix", default="agent/service:")
-    acquire.add_argument("--operation-label-prefix", default="agent/op:")
+    acquire.add_argument("--lock-label", default=DEFAULT_LOCK_LABEL)
+    acquire.add_argument("--max-parallel", default=DEFAULT_MAX_PARALLEL, type=int)
+    acquire.add_argument("--poll-seconds", default=DEFAULT_POLL_SECONDS, type=int)
+    acquire.add_argument("--timeout-minutes", default=DEFAULT_TIMEOUT_MINUTES, type=int)
+    acquire.add_argument("--stale-minutes", default=DEFAULT_STALE_MINUTES, type=int)
+    acquire.add_argument("--cooldown-minutes", default=DEFAULT_COOLDOWN_MINUTES, type=int)
+    acquire.add_argument("--service-label-prefix", default=DEFAULT_SERVICE_LABEL_PREFIX)
+    acquire.add_argument("--operation-label-prefix", default=DEFAULT_OPERATION_LABEL_PREFIX)
     acquire.add_argument("--github-output", default=os.getenv("GITHUB_OUTPUT", ""))
 
     release = subparsers.add_parser("release", help="Release issue lock")
     release.add_argument("--repo", required=True)
     release.add_argument("--issue-number", required=True, type=int)
-    release.add_argument("--lock-label", default="agent/running")
+    release.add_argument("--lock-label", default=DEFAULT_LOCK_LABEL)
     release.add_argument("--service-label", default="")
     release.add_argument("--operation-label", default="")
     release.add_argument("--record-operation", action="store_true")

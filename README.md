@@ -24,6 +24,13 @@
 - `.github/workflows/autonomous-agent-runner.yml`: 共通実行ワークフロー（`workflow_call`）
 - `scripts/agent_pipeline.py`: Issue から PR までを実行するオーケストレーター
 
+## AGENTS.md 導入
+
+このリポジトリには `AGENTS.md` を配置しており、Codex 実行時のプロジェクト固有ルールを定義しています。
+
+- 反映タイミング: `AGENTS.md` 更新後の「次回」Codex 実行から有効
+- 主な定義内容: トリガー条件、ロック運用、ログ保存方針、最低限の検証手順
+
 ## セットアップ
 
 1. エージェント実行コマンドを設定します。
