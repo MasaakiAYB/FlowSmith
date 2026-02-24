@@ -43,7 +43,7 @@
 
 - `event_type`: `autonomous-agent-issue-request`
 - 必須項目: `issue_number`
-- 任意項目: `project_id`, `target_repo`, `base_branch`, `branch_name`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 任意項目: `project_id`, `target_repo`, `base_branch`, `branch_name`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`, `codex_auth_json_b64`
 - 禁止項目: `feedback_pr_number`, `feedback_text`
 
 ```json
@@ -60,7 +60,7 @@
 
 - `event_type`: `autonomous-agent-feedback-request`
 - 必須項目: `issue_number`, `feedback_pr_number`, `branch_name`, `base_branch`
-- 任意項目: `feedback_text`, `project_id`, `target_repo`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`
+- 任意項目: `feedback_text`, `project_id`, `target_repo`, `no_sync`, `source_repository`, `request_id`, `dispatch_secret`, `codex_auth_json_b64`
 - 実行時挙動: `--allow-no-changes` を有効化し、差分ゼロは成功扱い（commit/push/PR更新をスキップ）
 
 ```json
@@ -174,7 +174,7 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 2. `actions/setup-node@v4` で Node.js 22 をセットアップ
 3. `fonts-noto-cjk` / `fonts-ipafont-*` を導入して日本語フォントをセットアップ（UI証跡の文字化け防止）
 4. `npm install -g @openai/codex` で `codex` CLI を導入（既存なら再インストールしない）
-5. `CODEX_AUTH_JSON_B64` があれば `~/.codex/auth.json` を復元し、なければ `OPENAI_API_KEY` で `codex login --with-api-key` を実行
+5. `codex_auth_json_b64`（repository_dispatch payload）-> `CODEX_AUTH_JSON_B64`（Secret）-> `OPENAI_API_KEY` の優先順で `codex` 認証を実行
 6. `AGENT_SETUP_SCRIPT` が設定されていれば実行
 7. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を `shlex` で解析し、実行コマンドが `PATH` 上に存在するか事前検証
 8. `FLOWSMITH_ENABLE_ENTIRE=true` のときのみ `Entire CLI` をインストール
@@ -190,6 +190,7 @@ FlowSmith の workflow（`autonomous-agent-pr.yml` / `autonomous-agent-dispatch.
 - `CROSS_REPO_GH_TOKEN`（任意。クロスリポジトリ更新時に推奨）
 
 `CODEX_AUTH_JSON_B64` は一時検証向けです。安定運用は API キー認証を推奨します。
+呼び出し元が `client_payload.codex_auth_json_b64` を渡した場合は、その値が優先されます。
 
 各コマンドで使えるプレースホルダー:
 

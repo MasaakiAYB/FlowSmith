@@ -19,6 +19,7 @@ jobs:
       target_repo: ${{ steps.payload.outputs.target_repo }}
       base_branch: ${{ steps.payload.outputs.base_branch }}
       branch_name: ${{ steps.payload.outputs.branch_name }}
+      codex_auth_json_b64: ${{ steps.payload.outputs.codex_auth_json_b64 }}
       source_repository: ${{ steps.payload.outputs.source_repository }}
       request_id: ${{ steps.payload.outputs.request_id }}
       no_sync: ${{ steps.payload.outputs.no_sync }}
@@ -33,6 +34,7 @@ jobs:
           target_repo="$(jq -r '.client_payload.target_repo // empty | tostring' "$GITHUB_EVENT_PATH")"
           base_branch="$(jq -r '.client_payload.base_branch // empty | tostring' "$GITHUB_EVENT_PATH")"
           branch_name="$(jq -r '.client_payload.branch_name // empty | tostring' "$GITHUB_EVENT_PATH")"
+          codex_auth_json_b64="$(jq -r '.client_payload.codex_auth_json_b64 // empty | tostring' "$GITHUB_EVENT_PATH")"
           source_repository="$(jq -r '.client_payload.source_repository // empty | tostring' "$GITHUB_EVENT_PATH")"
           request_id="$(jq -r '.client_payload.request_id // empty | tostring' "$GITHUB_EVENT_PATH")"
           no_sync_raw="$(jq -r '.client_payload.no_sync // false | tostring' "$GITHUB_EVENT_PATH")"
@@ -74,6 +76,10 @@ jobs:
           echo "target_repo=$target_repo" >> "$GITHUB_OUTPUT"
           echo "base_branch=$base_branch" >> "$GITHUB_OUTPUT"
           echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+          if [ -n "$codex_auth_json_b64" ]; then
+            echo "::add-mask::$codex_auth_json_b64"
+          fi
+          echo "codex_auth_json_b64=$codex_auth_json_b64" >> "$GITHUB_OUTPUT"
           echo "source_repository=$source_repository" >> "$GITHUB_OUTPUT"
           echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
           echo "no_sync=$no_sync" >> "$GITHUB_OUTPUT"
@@ -102,6 +108,7 @@ jobs:
       target_repo: ${{ needs.validate-payload.outputs.target_repo }}
       base_branch: ${{ needs.validate-payload.outputs.base_branch }}
       branch_name: ${{ needs.validate-payload.outputs.branch_name }}
+      codex_auth_json_b64: ${{ needs.validate-payload.outputs.codex_auth_json_b64 }}
       source_repository: ${{ needs.validate-payload.outputs.source_repository }}
       request_id: ${{ needs.validate-payload.outputs.request_id }}
       no_sync: ${{ needs.validate-payload.outputs.no_sync == 'true' }}

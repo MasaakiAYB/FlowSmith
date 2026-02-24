@@ -183,7 +183,7 @@ FlowSmith を運用するときは、次の2層で設定します。
 
 1. Python/Node.js と日本語フォントをセットアップ
 2. `codex` CLI をインストール
-3. `CODEX_AUTH_JSON_B64` または `OPENAI_API_KEY` で認証
+3. `codex_auth_json_b64`（workflow input）-> `CODEX_AUTH_JSON_B64`（Secret）-> `OPENAI_API_KEY` の優先順で認証
 4. `AGENT_SETUP_SCRIPT`（任意）を実行
 5. `AGENT_PLANNER_CMD` / `AGENT_CODER_CMD` / `AGENT_REVIEWER_CMD` を事前検証
 6. `scripts/agent_pipeline.py` を実行して commit / push / PR作成・更新
@@ -208,6 +208,7 @@ FlowSmithを呼び出す側（業務アプリ側）には、次を設定しま�
 
 - Secret `FLOW_SMITH_DISPATCH_TOKEN`: FlowSmith リポジトリに `repository_dispatch` 可能なトークン
 - Secret `FLOW_SMITH_DISPATCH_SECRET`: FlowSmith 側の `DISPATCH_SHARED_SECRET` と同じ値（設定している場合）
+- Secret `FLOW_SMITH_CODEX_AUTH_JSON_B64`: 利用者 `auth.json` の base64（任意。FlowSmith側へそのまま転送）
 - Variable `FLOW_SMITH_REPO`: `owner/FlowSmith` 形式（例: `MasaakiAYB/FlowSmith`）
 - Variable `FLOW_SMITH_PROJECT_ID`: FlowSmith の `.agent/projects.json` を使うときのみ指定
 
@@ -577,6 +578,7 @@ jobs:
 - `issue_number` は必須（整数）
 - `project_id` または `target_repo` のどちらかは必須
 - FlowSmith側で `DISPATCH_SHARED_SECRET` を使う場合は `dispatch_secret` が必須
+- `codex_auth_json_b64` は任意。指定時は FlowSmith 側で `CODEX_AUTH_JSON_B64` Secret より優先して使用
 
 Issue起点の禁止項目:
 

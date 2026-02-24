@@ -27,6 +27,11 @@ on:
         required: false
         default: ""
         type: string
+      codex_auth_json_b64:
+        description: "任意: 利用者auth.json(base64)"
+        required: false
+        default: ""
+        type: string
       feedback_pr_number:
         description: "任意: 改善指摘を抽出する対象PR番号（対象repo側）"
         required: false
@@ -58,6 +63,7 @@ jobs:
       target_repo: ${{ inputs.target_repo }}
       base_branch: ${{ inputs.base_branch }}
       branch_name: ${{ inputs.branch_name }}
+      codex_auth_json_b64: ${{ inputs.codex_auth_json_b64 }}
       feedback_pr_number: ${{ inputs.feedback_pr_number }}
       feedback_text: ${{ inputs.feedback_text }}
       no_sync: ${{ inputs.no_sync }}

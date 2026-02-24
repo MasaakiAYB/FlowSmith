@@ -31,6 +31,11 @@ on:
         required: false
         default: ""
         type: string
+      codex_auth_json_b64:
+        description: "任意: 利用者auth.json(base64)"
+        required: false
+        default: ""
+        type: string
       feedback_pr_number:
         description: "任意: 改善指摘抽出対象PR番号"
         required: false
@@ -151,7 +156,8 @@ jobs:
       AGENT_REVIEWER_CMD: ${{ secrets.AGENT_REVIEWER_CMD }}
       AGENT_SETUP_SCRIPT: ${{ secrets.AGENT_SETUP_SCRIPT }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+      CODEX_AUTH_JSON_B64_SECRET: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+      CODEX_AUTH_JSON_B64_INPUT: ${{ inputs.codex_auth_json_b64 }}
       TARGET_REPO_RESOLVED: ${{ needs.acquire-lock.outputs.target_repo }}
       FLOWSMITH_RUN_ARTIFACT_NAME: agent-run-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -192,11 +198,20 @@ jobs:
       - name: Codex 認証設定
         run: |
           set -euo pipefail
-          if [ -n "${CODEX_AUTH_JSON_B64:-}" ]; then
+          resolved_auth_json_b64="${CODEX_AUTH_JSON_B64_INPUT:-}"
+          auth_source="workflow input codex_auth_json_b64"
+
+          if [ -z "$resolved_auth_json_b64" ]; then
+            resolved_auth_json_b64="${CODEX_AUTH_JSON_B64_SECRET:-}"
+            auth_source="repository secret CODEX_AUTH_JSON_B64"
+          fi
+
+          if [ -n "$resolved_auth_json_b64" ]; then
+            echo "::add-mask::$resolved_auth_json_b64"
             mkdir -p "$HOME/.codex"
-            printf '%s' "$CODEX_AUTH_JSON_B64" | base64 --decode > "$HOME/.codex/auth.json"
+            printf '%s' "$resolved_auth_json_b64" | base64 --decode > "$HOME/.codex/auth.json"
             chmod 600 "$HOME/.codex/auth.json"
-            echo "Codex 認証: CODEX_AUTH_JSON_B64 を使用"
+            echo "Codex 認証: ${auth_source} を使用"
           elif [ -n "${OPENAI_API_KEY:-}" ]; then
             printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
             echo "Codex 認証: OPENAI_API_KEY を使用"
