@@ -25,6 +25,7 @@ jobs:
       request_id: ${{ steps.payload.outputs.request_id }}
       feedback_text: ${{ steps.payload.outputs.feedback_text }}
       no_sync: ${{ steps.payload.outputs.no_sync }}
+      duplicate_request: ${{ steps.dedupe.outputs.duplicate_request }}
     steps:
       - name: ペイロード検証（Feedback）
         id: payload
@@ -101,6 +102,36 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: 重複リクエスト判定（Feedback）
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ secrets.CROSS_REPO_GH_TOKEN || github.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.target_repo }}
+          ISSUE_NUMBER: ${{ steps.payload.outputs.issue_number }}
+          REQUEST_ID: ${{ steps.payload.outputs.request_id }}
+        run: |
+          set -euo pipefail
+
+          echo "duplicate_request=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${REQUEST_ID:-}" ] || [ -z "${TARGET_REPO:-}" ] || [ -z "${ISSUE_NUMBER:-}" ]; then
+            exit 0
+          fi
+
+          marker="flowsmith-request-id:${REQUEST_ID}"
+          existing_id="$(
+            gh api --paginate "repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}/comments?per_page=100" \
+              --jq ".[] | select((.body // \"\") | contains(\"${marker}\")) | .id" \
+              | head -n 1 || true
+          )"
+
+          if [ -n "$existing_id" ]; then
+            echo "duplicate_request=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          gh api -X POST "repos/${TARGET_REPO}/issues/${ISSUE_NUMBER}/comments" \
+            -f "body=<!-- ${marker} -->" >/dev/null
+
       - name: サマリー（Feedback）
         if: ${{ always() }}
         run: |
@@ -114,10 +145,12 @@ jobs:
             echo "- branch_name: \`${{ steps.payload.outputs.branch_name || '未指定' }}\`"
             echo "- feedback_pr_number: \`${{ steps.payload.outputs.feedback_pr_number || '未指定' }}\`"
             echo "- no_sync: \`${{ steps.payload.outputs.no_sync || 'false' }}\`"
+            echo "- duplicate_request: \`${{ steps.dedupe.outputs.duplicate_request || 'false' }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   run-agent:
     needs: validate-payload
+    if: ${{ needs.validate-payload.outputs.duplicate_request != 'true' }}
     uses: ./.github/workflows/autonomous-agent-runner.yml
     with:
       dispatch_mode: feedback
