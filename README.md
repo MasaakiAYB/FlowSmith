@@ -262,6 +262,7 @@ on:
     types:
       - opened
       - labeled
+      - reopened
 
 permissions:
   contents: read
